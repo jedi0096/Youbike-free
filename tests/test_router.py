@@ -182,3 +182,12 @@ def test_no_path_returns_friendly_message():
     )
     plan = plan_route(g, isolated, (25.0, 121.5), (25.5, 122.0))
     assert not plan.feasible
+
+
+def test_custom_max_walk_km():
+    """可自訂起終點最遠步行距離：放寬後原本「附近無站」的情況也能規劃。"""
+    g = _build()
+    far_origin = (25.0 - 1.5 / 111, 121.5)  # 離最近站約 1.5 km
+    dest = (25.0, 121.5 + DEG_PER_KM)
+    assert not plan_route(g, STATIONS, far_origin, dest).feasible
+    assert plan_route(g, STATIONS, far_origin, dest, max_walk_km=2.0).feasible

@@ -103,7 +103,7 @@ def build_cooldown_graph(
             lat_i, lon_i = lats[i], lons[i]
             max_minutes_i = _max_minutes_for(i)
             max_km_i = max_minutes_i * speed_kmh / 60 / detour_factor
-            for j in _candidates(i, lats, ride_window):
+            for j in _candidates(i, lats, ride_window, lons):
                 if not allow_cross_circle and circles[i] != circles[j]:
                     continue
                 if require_availability and docks[j] < min_docks:
@@ -119,7 +119,7 @@ def build_cooldown_graph(
                                weight=minutes, distance_km=dist, mode="ride", ride_count=1)
 
         # walk：(i,in) -> (j,out)，還車後步行到鄰站借車（鄰站 j 需可借車）
-        for j in _candidates(i, lats, walk_window):
+        for j in _candidates(i, lats, walk_window, lons):
             if i == j:
                 continue
             if not allow_cross_circle and circles[i] != circles[j]:
@@ -136,10 +136,20 @@ def build_cooldown_graph(
     return g
 
 
-def _candidates(i: int, lats: np.ndarray, window: float) -> np.ndarray:
+def _candidates(
+    i: int, lats: np.ndarray, window: float, lons: np.ndarray | None = None
+) -> np.ndarray:
+    """以緯度（及經度）視窗粗篩候選鄰居；window 為緯度度數。"""
     mask = np.abs(lats - lats[i]) <= window
+    if lons is not None:
+        mask &= np.abs(lons - lons[i]) <= _lon_window(window, lats[i])
     mask[i] = False
     return np.where(mask)[0]
+
+
+def _lon_window(lat_window: float, lat: float) -> float:
+    """把緯度視窗換成經度視窗：經度 1 度的長度隨緯度乘上 cos(緯度) 縮短。"""
+    return lat_window / max(np.cos(np.radians(lat)), 0.1)
 
 
 def plan_cooldown_route(
@@ -148,6 +158,7 @@ def plan_cooldown_route(
     origin: tuple[float, float],
     destination: tuple[float, float],
     strategy: Strategy = "fewest_swaps",
+    max_walk_km: float = MAX_WALK_KM,
 ) -> RoutePlan:
     """在 node-split 冷卻圖上規劃路線。回傳含 ride/walk/wait 各段的 RoutePlan。"""
     o_lat, o_lon = origin
@@ -172,10 +183,10 @@ def plan_cooldown_route(
             strategy=strategy, feasible=False, message=msg,
         )
 
-    if start_dist > MAX_WALK_KM:
-        return _fail(f"起點附近 {MAX_WALK_KM}km 內無 YouBike 站（最近 {start_dist:.2f}km）")
-    if end_dist > MAX_WALK_KM:
-        return _fail(f"終點附近 {MAX_WALK_KM}km 內無 YouBike 站（最近 {end_dist:.2f}km）")
+    if start_dist > max_walk_km:
+        return _fail(f"起點附近 {max_walk_km:g}km 內無 YouBike 站（最近 {start_dist:.2f}km）")
+    if end_dist > max_walk_km:
+        return _fail(f"終點附近 {max_walk_km:g}km 內無 YouBike 站（最近 {end_dist:.2f}km）")
     if start_id == end_id:
         return RoutePlan(
             segments=[], total_minutes=0.0, swap_count=0,
