@@ -30,14 +30,17 @@ STANDARD_COLUMNS = [
 # 各縣市原始欄位 -> 標準欄位的映射。
 # 同一標準欄位接受多個候選原始欄位名稱，取第一個存在的。
 FIELD_MAP: dict[str, list[str]] = {
+    # 各欄位最後一個候選為 YouBike 官方全台資料（apis.youbike.com.tw）的欄位名
     "station_id": ["sno", "StationID", "station_no"],
-    "name": ["sna", "StationName", "station_name"],
+    "name": ["sna", "StationName", "station_name", "name_tw"],
     "lat": ["latitude", "lat", "Latitude"],
     "lon": ["longitude", "lng", "Longitude"],
-    "total": ["Quantity", "tot_quantity", "tot", "total"],
-    "available_bikes": ["available_rent_bikes", "sbi_quantity", "sbi", "AvailableRentBikes"],
-    "available_docks": ["available_return_bikes", "bemp_quantity", "bemp", "AvailableReturnBikes"],
-    "updated_at": ["srcUpdateTime", "updateTime", "mday"],
+    "total": ["Quantity", "tot_quantity", "tot", "total", "parking_spaces"],
+    "available_bikes": ["available_rent_bikes", "sbi_quantity", "sbi", "AvailableRentBikes",
+                        "available_spaces"],
+    "available_docks": ["available_return_bikes", "bemp_quantity", "bemp", "AvailableReturnBikes",
+                        "empty_spaces"],
+    "updated_at": ["srcUpdateTime", "updateTime", "mday", "updated_at"],
     "active": ["act", "Status", "status"],
 }
 

@@ -17,8 +17,11 @@ from config import (
     DEFAULT_CYCLING_SPEED_KMH,
     ROUTE_DETOUR_FACTOR,
     SAFETY_MARGIN_MINUTES,
-    active_cities,
+    ACTIVE_CIRCLE,
+    CITY_CONFIG,
+    REGIONS,
     free_minutes_by_city,
+    supported_cities,
 )
 from config import settings
 from core.cooldown import build_cooldown_graph, plan_cooldown_route
@@ -41,8 +44,18 @@ from data.preprocessor import (
 from visualization.map_renderer import draw_route, render_base_map
 
 
-# 目前聚焦北北桃生活圈（其餘縣市暫不在主流程支援）。
-SUPPORTED_CITIES = active_cities()
+# 可選區域：只列出至少有一個縣市設定好資料來源的區域。
+SUPPORTED_REGIONS = [r for r in REGIONS if supported_cities(r)]
+
+# 各區域的範例起終點（地址, 緯度, 經度），切換區域時自動帶入，避免起終點落在別的縣市。
+REGION_EXAMPLES: dict[str, tuple[tuple[str, float, float], tuple[str, float, float]]] = {
+    "北北桃": (("台北車站", 25.0478, 121.5170), ("淡水捷運站", 25.1677, 121.4456)),
+    "竹竹苗": (("新竹火車站", 24.8016, 120.9716), ("竹北火車站", 24.8393, 121.0094)),
+    "台中": (("台中火車站", 24.1372, 120.6869), ("逢甲大學", 24.1789, 120.6467)),
+    "嘉南高屏": (("高雄車站", 22.6393, 120.3022), ("駁二藝術特區", 22.6202, 120.2818)),
+    "台東": (("台東轉運站", 22.7543, 121.1517), ("台東森林公園", 22.7630, 121.1680)),
+}
+_FALLBACK_EXAMPLE = REGION_EXAMPLES["北北桃"]
 
 # Streamlit Cloud 以 st.secrets 提供金鑰，但 config.settings 讀的是環境變數，
 # 故啟動時把 secrets 橋接到 os.environ（本機若用 .env 則此處通常為空，不受影響）。
@@ -142,20 +155,41 @@ def render_sidebar() -> dict:
     if st.sidebar.button("🔄 清除快取並重新整理", help="重抓最新即時車況並重建圖；"
                          "若出現「找不到路線」常是快取的車況過舊所致"):
         _clear_caches_and_rerun()
+    region = st.sidebar.selectbox(
+        "區域",
+        SUPPORTED_REGIONS,
+        index=SUPPORTED_REGIONS.index(ACTIVE_CIRCLE) if ACTIVE_CIRCLE in SUPPORTED_REGIONS else 0,
+        help="一次只載入一個區域的站點，避免把全台站點建成一張圖而吃光記憶體",
+    )
+    region_cities = supported_cities(region)
     cities = st.sidebar.multiselect(
-        "資料來源城市（北北桃）", SUPPORTED_CITIES, default=SUPPORTED_CITIES,
-        help="目前聚焦北北桃生活圈，可規劃台北↔新北↔桃園的跨縣市路線",
+        f"資料來源縣市（{region}）", region_cities, default=region_cities,
+        key=f"cities_{region}",
+        help="同區域內大多可跨縣市借還；需付跨區調度費的組合會依下方選項處理",
     )
     has_tpass = st.sidebar.toggle(
         "持有 TPASS 月票",
         value=False,
-        help="影響免費騎乘上限：桃園一般 30 分、TPASS 60 分；台北/新北皆 30 分",
+        help="影響各縣市的免費騎乘上限（例如桃園 TPASS 60 分；台南、高雄需 TPASS 才有前 30 分免費）",
     )
     if cities:
         fmbc = free_minutes_by_city(list(cities), has_tpass)
         st.sidebar.caption(
             "各市免費上限：" + "、".join(f"{c} {m} 分" for c, m in fmbc.items())
         )
+        no_free = [c for c, m in fmbc.items() if m <= 0]
+        if no_free:
+            st.sidebar.warning(
+                "、".join(no_free) + " 目前沒有免費時段"
+                + ("（開啟 TPASS 可能適用）" if not has_tpass else "")
+                + "，這些縣市的站點不會被當成借車點。"
+            )
+        unverified = [c for c in cities if not CITY_CONFIG[c].get("verified", True)]
+        if unverified:
+            st.sidebar.caption(
+                "ℹ️ " + "、".join(unverified)
+                + " 的免費規則尚未對照官網確認，請以 YouBike 官網公告為準。"
+            )
     safety_margin = st.sidebar.number_input(
         "安全餘裕（分鐘）", min_value=0, max_value=10,
         value=SAFETY_MARGIN_MINUTES,
@@ -167,7 +201,7 @@ def render_sidebar() -> dict:
         format_func=lambda s: "最少換車" if s == "fewest_swaps" else "最短總時間",
     )
     allow_cross_circle = st.sidebar.checkbox(
-        "允許跨生活圈（會收 600~1135 元調度費）",
+        "允許跨區還車（會收 600~1135 元調度費）",
         value=False,
     )
     require_availability = st.sidebar.checkbox(
@@ -185,6 +219,10 @@ def render_sidebar() -> dict:
     st.sidebar.divider()
     st.sidebar.subheader("起點 / 終點")
 
+    (o_ex_addr, o_ex_lat, o_ex_lon), (d_ex_addr, d_ex_lat, d_ex_lon) = (
+        REGION_EXAMPLES.get(region, _FALLBACK_EXAMPLE)
+    )
+
     use_address = st.sidebar.toggle(
         "用地址 / 地標查詢", value=False,
         help="輸入地址或地標（如「台北車站」），自動轉成經緯度（需網路）",
@@ -192,27 +230,28 @@ def render_sidebar() -> dict:
 
     o_addr = d_addr = ""
     if use_address:
-        o_addr = st.sidebar.text_input("起點地址", value="台北車站")
-        d_addr = st.sidebar.text_input("終點地址", value="淡水捷運站")
-        o_lat, o_lon = 25.0478, 121.5170
-        d_lat, d_lon = 25.1677, 121.4456
+        o_addr = st.sidebar.text_input("起點地址", value=o_ex_addr, key=f"o_addr_{region}")
+        d_addr = st.sidebar.text_input("終點地址", value=d_ex_addr, key=f"d_addr_{region}")
+        o_lat, o_lon = o_ex_lat, o_ex_lon
+        d_lat, d_lon = d_ex_lat, d_ex_lon
     else:
         st.sidebar.caption("直接輸入經緯度")
         o_lat = st.sidebar.number_input(
-            "起點緯度", value=25.0478, format="%.5f", key="o_lat"
+            "起點緯度", value=o_ex_lat, format="%.5f", key=f"o_lat_{region}"
         )
         o_lon = st.sidebar.number_input(
-            "起點經度", value=121.5170, format="%.5f", key="o_lon"
+            "起點經度", value=o_ex_lon, format="%.5f", key=f"o_lon_{region}"
         )
         d_lat = st.sidebar.number_input(
-            "終點緯度", value=25.1677, format="%.5f", key="d_lat"
+            "終點緯度", value=d_ex_lat, format="%.5f", key=f"d_lat_{region}"
         )
         d_lon = st.sidebar.number_input(
-            "終點經度", value=121.4456, format="%.5f", key="d_lon"
+            "終點經度", value=d_ex_lon, format="%.5f", key=f"d_lon_{region}"
         )
     submit = st.sidebar.button("規劃路線", type="primary", width="stretch")
 
     return {
+        "region": region,
         "cities": tuple(cities),
         "has_tpass": has_tpass,
         "safety_margin": int(safety_margin),

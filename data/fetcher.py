@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import requests
 import urllib3
 
-from config import CITY_CONFIG
+from config import CITY_CONFIG, YOUBIKE_NATIONAL_URL
 
 # 部分政府開放資料 API 的憑證有瑕疵（例如新北市 data.ntpc.gov.tw 缺 Subject Key
 # Identifier），對應 city 會以 verify_ssl=False 連線。抑制相關警告以保持 CLI 乾淨。
@@ -50,12 +50,15 @@ def fetch_city_stations(
     if city not in CITY_CONFIG:
         raise ValueError(f"未知縣市: {city}")
     cfg = CITY_CONFIG[city]
-    api_url = cfg["api_url"]
+    base = cache_dir or CACHE_DIR
+
+    if cfg.get("source") == "youbike_national":
+        return _fetch_from_national(city, cfg, use_cache, cache_ttl, base)
+
+    api_url = cfg.get("api_url") or ""
     if not api_url or api_url.startswith("TODO"):
         raise FetchError(f"{city} 的 API URL 尚未設定")
     verify_ssl = cfg.get("verify_ssl", True)
-
-    base = cache_dir or CACHE_DIR
 
     if use_cache:
         cached = _load_cache(city, cache_ttl, base)
@@ -75,6 +78,48 @@ def fetch_city_stations(
 
     _save_cache(city, data, base)
     return data
+
+
+NATIONAL_CACHE_KEY = "_youbike_national"
+
+
+def _fetch_from_national(
+    city: str, cfg: dict[str, Any], use_cache: bool, cache_ttl: int, base: Path
+) -> list[dict[str, Any]]:
+    """從 YouBike 官方全台站點資料取出指定縣市（以 area_code 篩選）。
+
+    全台資料只抓一次並快取，同一區域內的多個縣市共用，不會重複下載。
+    """
+    area_code = str(cfg.get("area_code") or "")
+    if not area_code:
+        raise FetchError(f"{city} 尚未設定 area_code")
+
+    if use_cache:
+        cached = _load_cache(city, cache_ttl, base)
+        if cached is not None:
+            return cached
+
+    national = _load_cache(NATIONAL_CACHE_KEY, cache_ttl, base) if use_cache else None
+    if national is None:
+        data = _request_json("YouBike 全台資料", YOUBIKE_NATIONAL_URL, True)
+        if isinstance(data, dict):
+            # 防禦：若官方日後改成包一層 {"retVal": [...]} 之類的格式
+            data = next((v for v in data.values() if isinstance(v, list)), None)
+        if not isinstance(data, list):
+            raise FetchError("YouBike 全台資料格式非 list")
+        national = data
+        _save_cache(NATIONAL_CACHE_KEY, national, base)
+
+    records = [
+        r for r in national
+        if isinstance(r, dict) and str(r.get("area_code", "")).upper() == area_code.upper()
+    ]
+    if not records:
+        raise FetchError(
+            f"{city} 在 YouBike 全台資料中查無站點（area_code={area_code}），已略過該市"
+        )
+    _save_cache(city, records, base)
+    return records
 
 
 def _request_json(city: str, api_url: str, verify_ssl: bool) -> Any:
