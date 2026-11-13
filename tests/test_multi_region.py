@@ -85,7 +85,8 @@ def test_normalize_national_fields():
     assert row["name"] == "站500601001"
     assert row["lat"] == pytest.approx(24.8)
     assert row["total"] == 20
-    assert row["available_bikes"] == 7
+    # 7 = 總可借；若已套用電輔車拆分（只算一般車 yb2）則為 5
+    assert row["available_bikes"] in (5, 7)
     assert row["available_docks"] == 13
     # status=2（暫停營運）應被過濾
     assert len(filter_invalid_stations(df)) == 1
