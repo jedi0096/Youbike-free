@@ -22,8 +22,9 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-from config import CROSS_CIRCLE_FEE_NTD, city_to_circle
+from config import city_to_circle, return_fee_ntd
 from core.route_optimizer import (
+    cross_fee_message,
     MAX_WALK_KM,
     RoutePlan,
     RouteSegment,
@@ -104,7 +105,7 @@ def build_cooldown_graph(
             max_minutes_i = _max_minutes_for(i)
             max_km_i = max_minutes_i * speed_kmh / 60 / detour_factor
             for j in _candidates(i, lats, ride_window, lons):
-                if not allow_cross_circle and circles[i] != circles[j]:
+                if not allow_cross_circle and return_fee_ntd(cities[i], cities[j]) > 0:
                     continue
                 if require_availability and docks[j] < min_docks:
                     continue  # j 還不了車 → 不可當終點
@@ -122,7 +123,7 @@ def build_cooldown_graph(
         for j in _candidates(i, lats, walk_window, lons):
             if i == j:
                 continue
-            if not allow_cross_circle and circles[i] != circles[j]:
+            if not allow_cross_circle and return_fee_ntd(cities[i], cities[j]) > 0:
                 continue
             if require_availability and bikes[j] < min_bikes:
                 continue
@@ -210,19 +211,13 @@ def plan_cooldown_route(
 
     segments, ride_min, transfer_min, ride_count = _build_segments(graph, node_path)
 
-    cross = [
-        s for s in segments
-        if s.mode == "ride"
-        and graph.nodes[(s.from_station_id, "out")].get("circle")
-        != graph.nodes[(s.to_station_id, "in")].get("circle")
-    ]
-    msg = ""
-    if cross:
-        lo, hi = CROSS_CIRCLE_FEE_NTD
-        msg = (
-            f"⚠️ 路線包含 {len(cross)} 段跨生活圈騎乘，"
-            f"還車時可能被收 {lo}~{hi} 元調度費（即非全程免費）"
-        )
+    msg = cross_fee_message(
+        [
+            (graph.nodes[(s.from_station_id, "out")].get("city"),
+             graph.nodes[(s.to_station_id, "in")].get("city"))
+            for s in segments if s.mode == "ride"
+        ]
+    )
 
     return RoutePlan(
         segments=segments,
