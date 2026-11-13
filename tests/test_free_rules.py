@@ -12,8 +12,9 @@ def test_free_minutes_for_taipei_constant():
     assert free_minutes_for("台北市", has_tpass=True) == 30
 
 
-def test_free_minutes_for_taoyuan_tpass_extends():
-    assert free_minutes_for("桃園市", has_tpass=False) == 30
+def test_free_minutes_for_taoyuan_is_60_for_all_members():
+    # 桃園 2023/4/1 起會員前 60 分鐘免費，不需 TPASS
+    assert free_minutes_for("桃園市", has_tpass=False) == 60
     assert free_minutes_for("桃園市", has_tpass=True) == 60
 
 

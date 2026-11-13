@@ -65,6 +65,11 @@ def render_base_map(
         bikes = int(row.available_bikes or 0)
         docks = int(row.available_docks or 0)
         color = _station_color(bikes, docks)
+        ebikes = getattr(row, "available_ebikes", None)
+        if ebikes is None or pd.isna(ebikes):
+            bike_text = f"可借: {bikes}（可能含電輔車）"
+        else:
+            bike_text = f"可借一般車: {bikes}<br>電輔車: {int(ebikes)}（不免費）"
         folium.CircleMarker(
             location=(row.lat, row.lon),
             radius=4,
@@ -73,7 +78,7 @@ def render_base_map(
             fill_opacity=0.7,
             popup=folium.Popup(
                 f"<b>{row.name}</b><br>"
-                f"可借: {bikes} / 可還: {docks}<br>"
+                f"{bike_text}<br>可還: {docks}<br>"
                 f"{row.city}",
                 max_width=250,
             ),

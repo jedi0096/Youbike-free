@@ -229,7 +229,7 @@ def render_sidebar() -> dict:
     st.sidebar.subheader("我的騎乘偏好")
     has_tpass = st.sidebar.toggle(
         "持有 TPASS 月票", key="tpass",
-        help="影響免費騎乘上限：桃園一般 30 分、TPASS 60 分；台北/新北皆 30 分",
+        help="目前北北桃的免費上限與 TPASS 無關：台北/新北 30 分、桃園 60 分。保留此選項供未來其他縣市使用",
     )
     strategy = st.sidebar.radio(
         "路線偏好",
@@ -266,7 +266,9 @@ def render_sidebar() -> dict:
         require_availability = st.checkbox(
             "只走有車可借 / 有位可還的站",
             value=True,
-            help="依即時車輛數過濾：借不到車的站不當起點、還不了車的站不當終點",
+            help="依即時車輛數過濾：借不到車的站不當起點、還不了車的站不當終點。"
+                 "電輔車（2.0E）不適用免費時段，所以新北的站只計算一般車；"
+                 "台北的開放資料沒有分開電輔車數量，顯示的可借數可能含電輔車。",
         )
         use_cooldown = st.checkbox(
             "換車時避開同站冷卻（步行到鄰站借車）",
