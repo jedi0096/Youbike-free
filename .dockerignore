@@ -1,0 +1,17 @@
+# 不需要、或不該進入映像檔的東西
+.git
+.github
+.devcontainer
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+route_preview.html
+
+# 金鑰只在執行時提供（docker compose 會讀 .env），絕不打包進映像檔
+.env
+.streamlit/secrets.toml
+
+# 站點資料快取由容器自己產生
+data/cache/*.json

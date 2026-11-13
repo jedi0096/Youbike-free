@@ -1,0 +1,81 @@
+# 自己架設（self-host）：在這個資料夾執行
+#   docker compose up -d --build
+# 然後用瀏覽器開 http://localhost:8501 。完整說明（含對外公開網址）見 DEPLOY.md。
+#
+# 下面 ${名稱:-預設值} 的設定都可以在 .env 裡覆寫（.env 由 .env.example 複製而來）。
+services:
+  app:
+    build: .
+    image: youbike-free:latest
+    container_name: youbike-free
+    # 程式當掉、或 Docker / 主機重新啟動後自動重啟（手動 docker compose stop 則不會）
+    restart: unless-stopped
+    ports:
+      # 預設只有這台電腦自己連得到。要讓同一個網路的手機、電腦也連得到，
+      # 在 .env 設 APP_BIND=0.0.0.0；要給外面的人用，請用下面的 tunnel，不必改這裡。
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8501}:8501"
+    # API 金鑰與選用設定放在 .env。沒有 .env 也能啟動，
+    # 只是 Google Maps 校正與 AI 建議會自動停用。
+    env_file:
+      - path: .env
+        required: false
+    # 記憶體上限：超過時 Docker 會強制重啟這個容器，避免拖垮整台電腦。
+    # App 在建站點圖前會先看這個上限還剩多少，不夠就先清掉舊圖（見 DEPLOY.md）。
+    mem_limit: ${APP_MEM_LIMIT:-3g}
+    # 這個 App 不需要任何系統特權，全部拿掉；即使程式被攻破，能做的事也有限。
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # 記錄檔最多保留 3 個、每個 10 MB，長期開著也不會把硬碟塞滿。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---- 選用：對外公開網址（Cloudflare Tunnel）----
+  # 由這台電腦主動連到 Cloudflare，外面的人再經由 Cloudflare 連進來，
+  # 所以不必設定路由器，也不會暴露家裡的 IP。預設不會啟動，啟用方式見 DEPLOY.md。
+
+  # 臨時網址：不用註冊。網址是隨機的，每次重新啟動都會換一個。
+  tunnel:
+    profiles: ["public"]
+    image: cloudflare/cloudflared:latest
+    container_name: youbike-free-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://app:8501
+    depends_on:
+      app:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 固定網址：需要 Cloudflare 帳號與一個網域，把 Cloudflare 給的金鑰放在 .env 的 TUNNEL_TOKEN。
+  tunnel-fixed:
+    profiles: ["public-fixed"]
+    image: cloudflare/cloudflared:latest
+    container_name: youbike-free-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      app:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
