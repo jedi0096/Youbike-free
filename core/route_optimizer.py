@@ -182,8 +182,12 @@ def plan_route(
     origin: tuple[float, float],
     destination: tuple[float, float],
     strategy: Strategy = "fewest_swaps",
+    max_walk_km: float = MAX_WALK_KM,
 ) -> RoutePlan:
-    """規劃從 origin 到 destination 的免費騎乘路線。"""
+    """規劃從 origin 到 destination 的免費騎乘路線。
+
+    max_walk_km：起終點到最近站可接受的最大步行距離（公里），超過即回報附近無站。
+    """
     o_lat, o_lon = origin
     d_lat, d_lon = destination
 
@@ -205,10 +209,10 @@ def plan_route(
             strategy=strategy, feasible=False, message=msg,
         )
 
-    if start_dist > MAX_WALK_KM:
-        return _fail(f"起點附近 {MAX_WALK_KM}km 內無 YouBike 站（最近 {start_dist:.2f}km）")
-    if end_dist > MAX_WALK_KM:
-        return _fail(f"終點附近 {MAX_WALK_KM}km 內無 YouBike 站（最近 {end_dist:.2f}km）")
+    if start_dist > max_walk_km:
+        return _fail(f"起點附近 {max_walk_km:g}km 內無 YouBike 站（最近 {start_dist:.2f}km）")
+    if end_dist > max_walk_km:
+        return _fail(f"終點附近 {max_walk_km:g}km 內無 YouBike 站（最近 {end_dist:.2f}km）")
 
     if start_id == end_id:
         return RoutePlan(

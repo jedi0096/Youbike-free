@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import networkx as nx
 import pandas as pd
@@ -22,12 +24,20 @@ from config import (
 )
 from config import settings
 from core.cooldown import build_cooldown_graph, plan_cooldown_route
+from core.directions import (
+    build_steps,
+    estimate_arrival,
+    format_latlon,
+    parse_latlon,
+    total_trip_minutes,
+)
 from core.feedback import collect_facts, generate_feedback
 from core.geocoder import GeocodeError, geocode_address_verbose
 from core.gmaps import GMapsError, get_travel_time
 from core.time_estimator import haversine_km
 from core.graph_builder import build_station_graph
 from core.route_optimizer import (
+    MAX_WALK_KM,
     SAME_STATION_COOLDOWN_MIN,
     RoutePlan,
     plan_route,
@@ -38,7 +48,13 @@ from data.preprocessor import (
     merge_cities,
     normalize_stations,
 )
-from visualization.map_renderer import draw_route, render_base_map
+from visualization.map_renderer import (
+    MAP_STYLES,
+    draw_route,
+    render_base_map,
+    stations_near_route,
+    view_for_route,
+)
 
 
 # 目前聚焦北北桃生活圈（其餘縣市暫不在主流程支援）。
@@ -97,7 +113,8 @@ def load_stations(cities: tuple[str, ...]) -> pd.DataFrame:
     return filter_invalid_stations(merge_cities(dfs))
 
 
-@st.cache_resource(show_spinner="建構站點圖中…")
+# 每張圖可能有上百萬條邊，最多只留幾張在記憶體，避免使用者多次調整設定後記憶體爆掉。
+@st.cache_resource(show_spinner="建構站點圖中…", max_entries=4)
 def get_graph(
     cities: tuple[str, ...],
     has_tpass: bool,
@@ -105,6 +122,7 @@ def get_graph(
     allow_cross_circle: bool,
     require_availability: bool,
     use_cooldown: bool,
+    speed_kmh: float = DEFAULT_CYCLING_SPEED_KMH,
 ) -> tuple[nx.DiGraph, pd.DataFrame]:
     df = load_stations(cities)
     if df.empty:
@@ -113,7 +131,7 @@ def get_graph(
     common = dict(
         free_minutes=max(fmbc.values()) if fmbc else 30,
         safety_margin=safety_margin,
-        speed_kmh=DEFAULT_CYCLING_SPEED_KMH,
+        speed_kmh=speed_kmh,
         detour_factor=ROUTE_DETOUR_FACTOR,
         allow_cross_circle=allow_cross_circle,
         require_availability=require_availability,
@@ -137,115 +155,224 @@ def _clear_caches_and_rerun() -> None:
     st.rerun()
 
 
+# 騎乘速度選項：介面文字 → 平均時速（km/h）
+SPEED_PRESETS: dict[str, float] = {
+    "悠閒（10 km/h）": 10.0,
+    "一般（12 km/h）": DEFAULT_CYCLING_SPEED_KMH,
+    "輕快（15 km/h）": 15.0,
+    "運動（18 km/h）": 18.0,
+}
+_DEFAULT_SPEED_LABEL = next(
+    k for k, v in SPEED_PRESETS.items() if v == DEFAULT_CYCLING_SPEED_KMH
+)
+_STRATEGY_LABEL = {"fewest_swaps": "最少換車", "shortest_time": "最短時間"}
+_STATION_DISPLAY = ["路線附近的站", "全部站點", "不顯示站點"]
+_DEFAULT_ORIGIN = "台北車站"
+_DEFAULT_DESTINATION = "淡水捷運站"
+
+
+def _init_state_from_query_params() -> None:
+    """第一次開頁時，用網址參數（分享 / 書籤連結）帶入起終點與偏好。"""
+    if st.session_state.get("_qp_loaded"):
+        return
+    st.session_state["_qp_loaded"] = True
+    qp = st.query_params
+    st.session_state.setdefault("o_text", qp.get("from", _DEFAULT_ORIGIN))
+    st.session_state.setdefault("d_text", qp.get("to", _DEFAULT_DESTINATION))
+    if qp.get("strategy") in _STRATEGY_LABEL:
+        st.session_state.setdefault("strategy", qp["strategy"])
+    if qp.get("tpass") in ("0", "1"):
+        st.session_state.setdefault("tpass", qp["tpass"] == "1")
+    speed = qp.get("speed")
+    for label, v in SPEED_PRESETS.items():
+        if speed and speed == f"{v:g}":
+            st.session_state.setdefault("speed", label)
+    st.session_state.setdefault("speed", _DEFAULT_SPEED_LABEL)
+    # 連結同時帶有起終點 → 開頁後自動規劃一次
+    st.session_state["_auto_plan"] = bool(qp.get("from") and qp.get("to"))
+
+
+def _update_query_params(inp: dict) -> None:
+    """把目前的起終點與偏好寫進網址，複製網址即可分享或加入書籤。"""
+    st.query_params.from_dict({
+        "from": inp["origin_text"],
+        "to": inp["destination_text"],
+        "strategy": inp["strategy"],
+        "tpass": "1" if inp["has_tpass"] else "0",
+        "speed": f"{inp['speed_kmh']:g}",
+    })
+
+
+def _swap_endpoints() -> None:
+    st.session_state["o_text"], st.session_state["d_text"] = (
+        st.session_state.get("d_text", ""), st.session_state.get("o_text", ""),
+    )
+
+
+def _set_endpoint_from_click(which: str, lat: float, lon: float) -> None:
+    st.session_state["o_text" if which == "origin" else "d_text"] = format_latlon(lat, lon)
+    st.session_state["_handled_click"] = (lat, lon)
+
+
 def render_sidebar() -> dict:
-    st.sidebar.header("路線設定")
-    if st.sidebar.button("🔄 清除快取並重新整理", help="重抓最新即時車況並重建圖；"
-                         "若出現「找不到路線」常是快取的車況過舊所致"):
-        _clear_caches_and_rerun()
-    cities = st.sidebar.multiselect(
-        "資料來源城市（北北桃）", SUPPORTED_CITIES, default=SUPPORTED_CITIES,
-        help="目前聚焦北北桃生活圈，可規劃台北↔新北↔桃園的跨縣市路線",
+    st.sidebar.header("🚲 要去哪裡？")
+    st.sidebar.text_input(
+        "起點", key="o_text",
+        help="可輸入地址、地標（如「台北車站」），或「緯度, 經度」；"
+             "也可以直接在地圖上點一下設定",
     )
-    has_tpass = st.sidebar.toggle(
-        "持有 TPASS 月票",
-        value=False,
-        help="影響免費騎乘上限：桃園一般 30 分、TPASS 60 分；台北/新北皆 30 分",
-    )
-    if cities:
-        fmbc = free_minutes_by_city(list(cities), has_tpass)
-        st.sidebar.caption(
-            "各市免費上限：" + "、".join(f"{c} {m} 分" for c, m in fmbc.items())
-        )
-    safety_margin = st.sidebar.number_input(
-        "安全餘裕（分鐘）", min_value=0, max_value=10,
-        value=SAFETY_MARGIN_MINUTES,
-        help="建議提前幾分鐘還車，避免估算誤差超時",
-    )
-    strategy = st.sidebar.radio(
-        "路線策略",
-        options=["fewest_swaps", "shortest_time"],
-        format_func=lambda s: "最少換車" if s == "fewest_swaps" else "最短總時間",
-    )
-    allow_cross_circle = st.sidebar.checkbox(
-        "允許跨生活圈（會收 600~1135 元調度費）",
-        value=False,
-    )
-    require_availability = st.sidebar.checkbox(
-        "只走有車可借 / 有位可還的站",
-        value=True,
-        help="依即時車輛數過濾：借不到車的站不當起點、還不了車的站不當終點",
-    )
-    use_cooldown = st.sidebar.checkbox(
-        "啟用步行換車（同站續借冷卻模型）",
-        value=False,
-        help="進階：換車時改以「步行到鄰站借車」或「原站等冷卻」建模，"
-             "讓路線把同站續借的 10~15 分鐘冷卻一併納入最佳化",
-    )
+    st.sidebar.button("⇅ 起終點對調", on_click=_swap_endpoints)
+    st.sidebar.text_input("終點", key="d_text")
+    submit = st.sidebar.button("規劃路線", type="primary", width="stretch")
 
     st.sidebar.divider()
-    st.sidebar.subheader("起點 / 終點")
-
-    use_address = st.sidebar.toggle(
-        "用地址 / 地標查詢", value=False,
-        help="輸入地址或地標（如「台北車站」），自動轉成經緯度（需網路）",
+    st.sidebar.subheader("我的騎乘偏好")
+    has_tpass = st.sidebar.toggle(
+        "持有 TPASS 月票", key="tpass",
+        help="影響免費騎乘上限：桃園一般 30 分、TPASS 60 分；台北/新北皆 30 分",
+    )
+    strategy = st.sidebar.radio(
+        "路線偏好",
+        options=list(_STRATEGY_LABEL),
+        format_func=_STRATEGY_LABEL.get,
+        key="strategy",
+        horizontal=True,
+        help="最少換車：換車次數最少；最短時間：騎乘總時間最短（可能多換幾次車）",
+    )
+    speed_label = st.sidebar.select_slider(
+        "我的騎乘速度", options=list(SPEED_PRESETS), key="speed",
+        help="騎得越快，每段能騎越遠、換車越少；騎得慢就選悠閒，避免估算太樂觀而超時",
+    )
+    safety_margin = st.sidebar.slider(
+        "提早還車的緩衝（分鐘）", min_value=0, max_value=10,
+        value=SAFETY_MARGIN_MINUTES,
+        help="每段在免費上限前提早幾分鐘還車，避免紅燈或繞路害你超時",
     )
 
-    o_addr = d_addr = ""
-    if use_address:
-        o_addr = st.sidebar.text_input("起點地址", value="台北車站")
-        d_addr = st.sidebar.text_input("終點地址", value="淡水捷運站")
-        o_lat, o_lon = 25.0478, 121.5170
-        d_lat, d_lon = 25.1677, 121.4456
-    else:
-        st.sidebar.caption("直接輸入經緯度")
-        o_lat = st.sidebar.number_input(
-            "起點緯度", value=25.0478, format="%.5f", key="o_lat"
+    with st.sidebar.expander("⚙️ 進階設定"):
+        cities = st.multiselect(
+            "資料來源城市", SUPPORTED_CITIES, default=SUPPORTED_CITIES,
+            help="目前聚焦北北桃生活圈，可規劃台北↔新北↔桃園的跨縣市路線",
         )
-        o_lon = st.sidebar.number_input(
-            "起點經度", value=121.5170, format="%.5f", key="o_lon"
+        if cities:
+            fmbc = free_minutes_by_city(list(cities), has_tpass)
+            st.caption(
+                "各市免費上限：" + "、".join(f"{c} {m} 分" for c, m in fmbc.items())
+            )
+        max_walk_km = st.slider(
+            "起終點最多走多遠去找站（公里）", min_value=0.3, max_value=2.0,
+            value=float(MAX_WALK_KM), step=0.1,
         )
-        d_lat = st.sidebar.number_input(
-            "終點緯度", value=25.1677, format="%.5f", key="d_lat"
+        require_availability = st.checkbox(
+            "只走有車可借 / 有位可還的站",
+            value=True,
+            help="依即時車輛數過濾：借不到車的站不當起點、還不了車的站不當終點",
         )
-        d_lon = st.sidebar.number_input(
-            "終點經度", value=121.4456, format="%.5f", key="d_lon"
+        use_cooldown = st.checkbox(
+            "換車時避開同站冷卻（步行到鄰站借車）",
+            value=False,
+            help="同站還車後要等 10~15 分鐘才能再借。開啟後，路線會把"
+                 "「走到隔壁站借」或「原地等」的時間一起算進去",
         )
-    submit = st.sidebar.button("規劃路線", type="primary", width="stretch")
+        allow_cross_circle = st.checkbox(
+            "允許跨生活圈（會收 600~1135 元調度費）",
+            value=False,
+        )
+
+    with st.sidebar.expander("🗺️ 地圖顯示"):
+        map_style = st.selectbox("底圖樣式", list(MAP_STYLES), key="map_style")
+        station_display = st.radio(
+            "規劃後要顯示哪些站", _STATION_DISPLAY, key="station_display",
+            help="只顯示路線附近的站，地圖比較清爽，手機上也比較順",
+        )
+
+    st.sidebar.divider()
+    if st.sidebar.button("🔄 重抓即時車況", help="清除快取、重抓最新即時車況並重建圖；"
+                         "若出現「找不到路線」常是快取的車況過舊所致"):
+        _clear_caches_and_rerun()
+
+    if st.session_state.pop("_auto_plan", False):
+        submit = True
 
     return {
         "cities": tuple(cities),
         "has_tpass": has_tpass,
         "safety_margin": int(safety_margin),
         "strategy": strategy,
+        "speed_kmh": SPEED_PRESETS[speed_label],
+        "max_walk_km": float(max_walk_km),
         "allow_cross_circle": allow_cross_circle,
         "require_availability": require_availability,
         "use_cooldown": use_cooldown,
-        "use_address": use_address,
-        "origin_address": o_addr,
-        "destination_address": d_addr,
-        "origin": (o_lat, o_lon),
-        "destination": (d_lat, d_lon),
+        "origin_text": st.session_state.get("o_text", "").strip(),
+        "destination_text": st.session_state.get("d_text", "").strip(),
+        "map_tiles": MAP_STYLES[map_style],
+        "station_display": station_display,
         "submit": submit,
     }
 
 
-def render_summary(plan: RoutePlan) -> None:
+def render_summary(plan: RoutePlan, depart: datetime | None = None) -> None:
     if not plan.feasible:
         st.error(f"❌ {plan.message}")
         return
     if plan.message:
         st.warning(plan.message)
 
-    cols = st.columns(4)
-    cols[0].metric("換車次數", plan.swap_count)
-    cols[1].metric("總騎乘時間", f"{plan.total_minutes:.1f} 分")
-    cols[2].metric("步行（起 / 終）",
-                   f"{plan.walk_to_start_min:.1f} / {plan.walk_from_end_min:.1f} 分")
-    total = (plan.total_minutes + plan.transfer_minutes
-             + plan.walk_to_start_min + plan.walk_from_end_min)
-    cols[3].metric("總時間（含步行）", f"{total:.1f} 分")
+    total = total_trip_minutes(plan)
+    c1, c2 = st.columns(2)
+    c1.metric("全程約", f"{total:.0f} 分")
+    c2.metric("換車", f"{plan.swap_count} 次")
+    c3, c4 = st.columns(2)
+    if depart is not None:
+        c3.metric("現在出發，約", estimate_arrival(depart, plan).strftime("%H:%M") + " 到")
+    fee_risk = "調度費" in (plan.message or "")
+    c4.metric("車資", "可能收調度費" if fee_risk else "0 元")
+    detail = (
+        f"騎車 {plan.total_minutes:.0f} 分 · 步行 "
+        f"{plan.walk_to_start_min + plan.walk_from_end_min:.0f} 分"
+    )
     if plan.transfer_minutes > 0:
-        st.caption(f"含換車（步行 / 等冷卻）時間約 {plan.transfer_minutes:.1f} 分")
+        detail += f" · 換車（步行 / 等冷卻）{plan.transfer_minutes:.0f} 分"
+    st.caption(detail)
+
+
+def render_steps(result: dict) -> None:
+    """逐步指引：白話說明每一步，並附 Google 地圖導航連結。"""
+    plan: RoutePlan = result["plan"]
+    stations: pd.DataFrame = result["stations"]
+    coords = {
+        sid: (float(lat), float(lon))
+        for sid, lat, lon in zip(stations["station_id"], stations["lat"], stations["lon"])
+    }
+    fmbc = result["fmbc"]
+    default_limit = max(fmbc.values()) if fmbc else 30
+    limit_for = {
+        sid: fmbc.get(city, default_limit) for sid, city in result["id_to_city"].items()
+    }
+    availability = {
+        sid: (int(b or 0), int(d or 0))
+        for sid, b, d in zip(
+            stations["station_id"], stations["available_bikes"], stations["available_docks"]
+        )
+    }
+    steps = build_steps(
+        plan, coords, result["origin"], result["destination"],
+        free_limit_for=limit_for, availability=availability,
+        tight_margin_min=result.get("safety_margin", SAFETY_MARGIN_MINUTES) + 1,
+    )
+    if not steps:
+        return
+    st.subheader("🧭 怎麼騎")
+    for i, step in enumerate(steps, 1):
+        line = f"**{i}. {step.icon} {step.text}**"
+        if step.minutes >= 0.5:
+            line += f"　約 {step.minutes:.0f} 分"
+        if step.nav_url:
+            line += f"　[導航]({step.nav_url})"
+        st.markdown(line)
+        if step.note:
+            st.caption(("⚠️ " if step.warn else "") + step.note)
 
 
 def render_itinerary(
@@ -298,15 +425,15 @@ def render_cooldown_advice(plan: RoutePlan) -> None:
     if not plan.swap_advice:
         return
     lo, hi = SAME_STATION_COOLDOWN_MIN
-    st.subheader("🔁 換車點冷卻提醒")
-    st.caption(
-        f"在換車點還車後，於同一站再借同型車可能需等 {lo}~{hi} 分鐘冷卻。"
-        "建議改到鄰近站借車，或改用雙卡輪替。"
-    )
-    for i, adv in enumerate(plan.swap_advice, 1):
-        with st.expander(f"換車點 #{i}：{adv.station_name}", expanded=False):
+    with st.expander("🔁 每個換車點附近可改借的站（避開同站冷卻）"):
+        st.caption(
+            f"在換車點還車後，於同一站再借同型車可能需等 {lo}~{hi} 分鐘冷卻。"
+            "建議改到鄰近站借車，或改用雙卡輪替。"
+        )
+        for i, adv in enumerate(plan.swap_advice, 1):
+            st.markdown(f"**換車點 #{i}：{adv.station_name}**")
             if not adv.alternatives:
-                st.write("附近 300m 內查無其他有車可借的站，建議於原站等候冷卻時間。")
+                st.caption("附近 300m 內查無其他有車可借的站，建議於原站等候冷卻時間。")
                 continue
             alt_rows = [
                 {
@@ -357,16 +484,22 @@ def _ride_edge_key(from_id: str, to_id: str, use_cooldown: bool):
     return (from_id, to_id)
 
 
-def _plan_on(graph, stations, origin, destination, strategy, use_cooldown) -> RoutePlan:
-    if use_cooldown:
-        return plan_cooldown_route(graph, stations, origin, destination, strategy=strategy)
-    return plan_route(graph, stations, origin, destination, strategy=strategy)
+def _plan_on(
+    graph, stations, origin, destination, strategy, use_cooldown,
+    max_walk_km: float = MAX_WALK_KM,
+) -> RoutePlan:
+    planner = plan_cooldown_route if use_cooldown else plan_route
+    return planner(
+        graph, stations, origin, destination,
+        strategy=strategy, max_walk_km=max_walk_km,
+    )
 
 
 def plan_with_google_validation(
     graph: nx.DiGraph, stations: pd.DataFrame,
     origin: tuple[float, float], destination: tuple[float, float],
     strategy: str, fmbc: dict[str, int], use_cooldown: bool, max_iter: int = 4,
+    max_walk_km: float = MAX_WALK_KM,
 ):
     """規劃路線，並以 Google 實測時間驗證：若某段實際 > 該段免費上限，移除該邊後重新
     規劃，直到各段都通過或無法再避開。
@@ -375,7 +508,9 @@ def plan_with_google_validation(
     """
     removed: list = []
     default_limit = max(fmbc.values()) if fmbc else 30
-    plan = _plan_on(graph, stations, origin, destination, strategy, use_cooldown)
+    plan = _plan_on(
+        graph, stations, origin, destination, strategy, use_cooldown, max_walk_km
+    )
     rows, any_over, gtimes = [], False, {}
     for it in range(max_iter + 1):
         if not plan.feasible:
@@ -395,7 +530,9 @@ def plan_with_google_validation(
             break  # 全部通過，或已用完重試次數（rows 對應目前 plan）
         removed.extend(over_edges)
         view = nx.restricted_view(graph, [], removed)
-        plan = _plan_on(view, stations, origin, destination, strategy, use_cooldown)
+        plan = _plan_on(
+            view, stations, origin, destination, strategy, use_cooldown, max_walk_km
+        )
 
     if plan.feasible and any_over and removed:
         plan.message = (
@@ -562,34 +699,122 @@ def render_ai_feedback(
 
 # ---------- 主流程 ----------
 
-def _resolve_addresses(
-    origin_address: str, destination_address: str
-) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    """將起終點地址轉成經緯度。任一失敗則顯示錯誤並回傳 None。"""
-    try:
-        o_lat, o_lon, o_name = geocode_cached(origin_address)
-        d_lat, d_lon, d_name = geocode_cached(destination_address)
-    except GeocodeError as e:
-        st.error(f"❌ 地址解析失敗：{e}")
+def _resolve_point(text: str, role: str) -> tuple[float, float, str | None] | None:
+    """把起點 / 終點文字轉成座標。
+
+    「緯度, 經度」直接使用；其餘當地址查詢。回傳 (lat, lon, 匹配地名或 None)，
+    失敗時顯示錯誤並回傳 None。
+    """
+    if not text:
+        st.error(f"❌ 請輸入{role}")
         return None
-    # 顯示實際匹配到的地名，方便確認是否解析正確（地名不符常是路線怪異的主因）
-    st.info(
-        f"📍 起點「{origin_address}」→ {o_name}（{o_lat:.5f}, {o_lon:.5f}）\n\n"
-        f"🏁 終點「{destination_address}」→ {d_name}（{d_lat:.5f}, {d_lon:.5f}）"
+    ll = parse_latlon(text)
+    if ll is not None:
+        return ll[0], ll[1], None
+    try:
+        lat, lon, name = geocode_cached(text)
+    except GeocodeError as e:
+        st.error(f"❌ {role}「{text}」找不到：{e}")
+        return None
+    return lat, lon, name
+
+
+def _render_map_click_actions(clicked: dict | None) -> None:
+    """地圖被點擊時，提供「設為起點 / 設為終點」按鈕。"""
+    if not clicked:
+        return
+    lat, lon = float(clicked["lat"]), float(clicked["lng"])
+    if st.session_state.get("_handled_click") == (lat, lon):
+        return
+    c0, c1, c2 = st.columns([2, 1, 1])
+    c0.caption(f"📍 你點的位置：{format_latlon(lat, lon)}")
+    c1.button("設為起點", on_click=_set_endpoint_from_click,
+              args=("origin", lat, lon), width="stretch")
+    c2.button("設為終點", on_click=_set_endpoint_from_click,
+              args=("destination", lat, lon), width="stretch")
+
+
+def _plan_and_store(inp: dict, graph: nx.DiGraph, stations: pd.DataFrame) -> None:
+    """解析起終點、規劃路線，結果存入 session_state。"""
+    o = _resolve_point(inp["origin_text"], "起點")
+    d = _resolve_point(inp["destination_text"], "終點")
+    if o is None or d is None:
+        return
+    origin, destination = (o[0], o[1]), (d[0], d[1])
+    matched = []
+    if o[2]:
+        matched.append(f"📍 起點「{inp['origin_text']}」→ {o[2]}")
+    if d[2]:
+        matched.append(f"🏁 終點「{inp['destination_text']}」→ {d[2]}")
+
+    t0 = time.time()
+    fmbc_now = free_minutes_by_city(list(inp["cities"]), inp["has_tpass"])
+    n_removed = 0
+    if settings.google_maps_api_key():
+        # 以 Google 實測驗證，超出免費上限的路段自動避開重規劃
+        with st.spinner("規劃並以 Google Maps 驗證各段時間（自動避開超時路段）…"):
+            plan, g_rows, g_over, g_times, n_removed = plan_with_google_validation(
+                graph, stations, origin, destination,
+                inp["strategy"], fmbc_now, inp["use_cooldown"],
+                max_walk_km=inp["max_walk_km"],
+            )
+        if plan.feasible:
+            _store_google_result(plan, g_rows, g_over, g_times)
+    else:
+        plan = _plan_on(
+            graph, stations, origin, destination,
+            inp["strategy"], inp["use_cooldown"], inp["max_walk_km"],
+        )
+    elapsed_ms = (time.time() - t0) * 1000
+    st.session_state["result"] = {
+        "plan": plan,
+        "origin": origin, "destination": destination,
+        "o_label": inp["origin_text"] or "起點",
+        "d_label": inp["destination_text"] or "終點",
+        "matched": matched,
+        "fmbc": fmbc_now,
+        "id_to_city": dict(zip(stations["station_id"], stations["city"])),
+        "stations": stations,
+        "has_tpass": inp["has_tpass"],
+        "safety_margin": inp["safety_margin"],
+        "elapsed_ms": elapsed_ms,
+        "n_removed": n_removed,
+        "depart": datetime.now(ZoneInfo("Asia/Taipei")),
+    }
+    _update_query_params(inp)
+
+
+def _build_map(inp: dict, stations: pd.DataFrame, result: dict | None):
+    if result is None:
+        # 尚未規劃：顯示全部站點，方便在地圖上點選起終點
+        m = render_base_map(stations, zoom_start=12, tiles=inp["map_tiles"])
+        return m
+    r_o, r_d, r_st, plan = (
+        result["origin"], result["destination"], result["stations"], result["plan"]
     )
-    return (o_lat, o_lon), (d_lat, d_lon)
+    display = inp["station_display"]
+    if display == "全部站點":
+        shown = r_st
+    elif display == "不顯示站點":
+        shown = r_st.iloc[0:0]
+    else:
+        shown = stations_near_route(r_st, plan, r_o, r_d)
+    center, zoom = view_for_route(plan, r_st, r_o, r_d)
+    m = render_base_map(shown, center=center, zoom_start=zoom, tiles=inp["map_tiles"])
+    return draw_route(m, plan, r_st, r_o, r_d)
 
 
 def main() -> None:
     _bridge_secrets_to_env()
-    st.set_page_config(page_title="YouBike 最省錢攻略", layout="wide")
+    st.set_page_config(page_title="YouBike 免費騎乘規劃", page_icon="🚲", layout="wide")
+    _init_state_from_query_params()
     st.title("🚲 YouBike 最省錢騎乘攻略")
-    st.caption("自動規劃中途換車路線，全程免費抵達目的地")
+    st.caption("自動規劃中途換車路線，每段都在免費時間內還車，全程免費抵達目的地")
 
     inp = render_sidebar()
 
     if not inp["cities"]:
-        st.info("請從側欄選擇至少一個城市。")
+        st.info("請在側欄「進階設定」選擇至少一個城市。")
         return
 
     graph, stations = get_graph(
@@ -599,99 +824,57 @@ def main() -> None:
         inp["allow_cross_circle"],
         inp["require_availability"],
         inp["use_cooldown"],
+        inp["speed_kmh"],
     )
     if stations.empty:
-        st.error("無法載入任何站點資料。")
+        st.error("無法載入任何站點資料，請稍後按側欄的「重抓即時車況」再試一次。")
         return
-
-    st.caption(f"已載入 {len(stations)} 站、{graph.number_of_edges()} 條邊")
-
-    origin = inp["origin"]
-    destination = inp["destination"]
-    if inp["use_address"]:
-        resolved = _resolve_addresses(
-            inp["origin_address"], inp["destination_address"]
-        )
-        if resolved is None:
-            return
-        origin, destination = resolved
 
     # 只有按下「規劃路線」才重算；結果存入 session_state，後續按 Google / AI 等按鈕
     # 觸發 rerun 時仍能保留（否則 submit 變 False，畫面會跳回預設訊息）。
     if inp["submit"]:
-        t0 = time.time()
-        fmbc_now = free_minutes_by_city(list(inp["cities"]), inp["has_tpass"])
-        n_removed = 0
-        if settings.google_maps_api_key():
-            # 以 Google 實測驗證，超出免費上限的路段自動避開重規劃
-            with st.spinner("規劃並以 Google Maps 驗證各段時間（自動避開超時路段）…"):
-                plan, g_rows, g_over, g_times, n_removed = plan_with_google_validation(
-                    graph, stations, origin, destination,
-                    inp["strategy"], fmbc_now, inp["use_cooldown"],
-                )
-            if plan.feasible:
-                sig = _route_signature(plan)
-                st.session_state["google_result"] = {
-                    "sig": sig, "rows": g_rows, "any_over": g_over,
-                }
-                st.session_state["google_times"] = {"sig": sig, "data": g_times}
-        else:
-            plan = _plan_on(
-                graph, stations, origin, destination,
-                inp["strategy"], inp["use_cooldown"],
-            )
-        elapsed_ms = (time.time() - t0) * 1000
-        if inp["use_address"]:
-            o_label = inp["origin_address"] or "起點"
-            d_label = inp["destination_address"] or "終點"
-        else:
-            o_label = f"({origin[0]:.4f}, {origin[1]:.4f})"
-            d_label = f"({destination[0]:.4f}, {destination[1]:.4f})"
-        st.session_state["result"] = {
-            "plan": plan,
-            "origin": origin, "destination": destination,
-            "o_label": o_label, "d_label": d_label,
-            "fmbc": fmbc_now,
-            "id_to_city": dict(zip(stations["station_id"], stations["city"])),
-            "stations": stations,
-            "has_tpass": inp["has_tpass"],
-            "elapsed_ms": elapsed_ms,
-            "n_removed": n_removed,
-        }
+        _plan_and_store(inp, graph, stations)
 
     result = st.session_state.get("result")
-
-    # 地圖
-    if result is not None:
-        r_o, r_d, r_st = result["origin"], result["destination"], result["stations"]
-        center = ((r_o[0] + r_d[0]) / 2, (r_o[1] + r_d[1]) / 2)
-        m = render_base_map(r_st, center=center, zoom_start=12)
-        m = draw_route(m, result["plan"], r_st, r_o, r_d)
-    else:
-        center = ((origin[0] + destination[0]) / 2,
-                  (origin[1] + destination[1]) / 2)
-        m = render_base_map(stations, center=center, zoom_start=12)
+    m = _build_map(inp, stations, result)
 
     map_col, info_col = st.columns([2, 1])
     with map_col:
-        st_folium(m, width=None, height=620, returned_objects=[])
+        out = st_folium(
+            m, width=None, height=560, key="main_map",
+            returned_objects=["last_clicked"],
+        )
+        _render_map_click_actions((out or {}).get("last_clicked"))
     with info_col:
         if result is None:
-            st.info("設定好起終點後，按側欄的「規劃路線」開始。")
+            st.info(
+                "在左側輸入起點和終點（地址、地標都可以），再按「規劃路線」。\n\n"
+                "💡 也可以直接在地圖上點一下，選「設為起點」或「設為終點」。"
+            )
+            st.caption(f"已載入 {len(stations)} 個站點")
         else:
-            st.caption(f"規劃耗時 {result['elapsed_ms']:.0f} ms")
-            render_summary(result["plan"])
+            render_summary(result["plan"], result.get("depart"))
+            for line in result.get("matched", []):
+                st.caption(line)
             if result.get("n_removed"):
                 st.caption(
                     f"🛰️ 已依 Google 實測自動避開 {result['n_removed']} 段可能超時的路段。"
                 )
             _render_endpoint_diagnostic(result)
+            st.caption(
+                "🔗 網址已更新成這條路線，複製網址就能分享，或加入書籤下次直接用。"
+            )
+            st.caption(
+                f"已載入 {len(stations)} 站、{graph.number_of_edges()} 條連線 · "
+                f"規劃耗時 {result['elapsed_ms']:.0f} ms"
+            )
 
     if result is not None and result["plan"].feasible:
-        st.subheader("詳細行程")
-        render_itinerary(result["plan"], result["fmbc"], result["id_to_city"])
-        render_google_refinement(result["plan"], result["stations"], result["fmbc"])
+        render_steps(result)
+        with st.expander("📋 詳細行程表（每段時間、距離、免費餘裕）"):
+            render_itinerary(result["plan"], result["fmbc"], result["id_to_city"])
         render_cooldown_advice(result["plan"])
+        render_google_refinement(result["plan"], result["stations"], result["fmbc"])
         render_ai_feedback(
             result["plan"], result["stations"], result["fmbc"],
             result["id_to_city"], result["o_label"], result["d_label"],
