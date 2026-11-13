@@ -215,3 +215,12 @@ def test_end_skips_nearest_station_without_docks():
 def test_nearest_falls_back_when_no_preferred_station_in_range():
     sid, _ = find_nearest_station(25.0, 121.5, STATIONS, prefer_ids=set())
     assert sid == "A"
+
+
+def test_custom_max_walk_km():
+    """可自訂起終點最遠步行距離：放寬後原本「附近無站」的情況也能規劃。"""
+    g = _build()
+    far_origin = (25.0 - 1.5 / 111, 121.5)  # 離最近站約 1.5 km
+    dest = (25.0, 121.5 + DEG_PER_KM)
+    assert not plan_route(g, STATIONS, far_origin, dest).feasible
+    assert plan_route(g, STATIONS, far_origin, dest, max_walk_km=2.0).feasible
