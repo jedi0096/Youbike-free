@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from app import itinerary_dataframe
+from ui.results import itinerary_dataframe
 from core.route_optimizer import RoutePlan, RouteSegment
 
 
