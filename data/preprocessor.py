@@ -4,7 +4,15 @@
 
 標準欄位:
     station_id, name, lat, lon, total, available_bikes, available_docks,
-    city, updated_at, active
+    city, updated_at, active, available_ebikes
+
+關於電輔車（YouBike 2.0E）：
+    電輔車不適用「前 30 分鐘免費」，從第一分鐘就要收費（每 30 分鐘 20 元）。
+    因此 available_bikes 只算「一般車（2.0）」，電輔車另存於 available_ebikes。
+    - 新北 API 有分開的 yb2_quantity / eyb_quantity，可正確拆開。
+    - YouBike 官方格式的 available_spaces_detail {yb2, eyb} 也支援。
+    - 台北開放資料目前只給總數，無法分辨，available_ebikes 為空值（NA），
+      available_bikes 可能含電輔車。
 """
 from __future__ import annotations
 
@@ -24,6 +32,7 @@ STANDARD_COLUMNS = [
     "city",
     "updated_at",
     "active",
+    "available_ebikes",
 ]
 
 
@@ -43,6 +52,25 @@ FIELD_MAP: dict[str, list[str]] = {
     "updated_at": ["srcUpdateTime", "updateTime", "mday", "updated_at"],
     "active": ["act", "Status", "status"],
 }
+
+
+# 一般車（YouBike 2.0）與電輔車（2.0E）分開計數的欄位
+REGULAR_BIKE_KEYS = ["yb2_quantity", "yb2"]
+EBIKE_KEYS = ["eyb_quantity", "eyb"]
+
+
+def _split_bike_counts(record: dict[str, Any]) -> tuple[Any, Any] | None:
+    """若資料有一般車 / 電輔車分開的數量，回傳 (一般車, 電輔車)，否則回傳 None。"""
+    sources = [record]
+    detail = record.get("available_spaces_detail")
+    if isinstance(detail, dict):
+        sources.append(detail)
+    for src in sources:
+        regular = _pick(src, REGULAR_BIKE_KEYS)
+        ebikes = _pick(src, EBIKE_KEYS)
+        if regular is not None or ebikes is not None:
+            return regular, ebikes
+    return None
 
 
 def _pick(record: dict[str, Any], candidates: list[str]) -> Any:
@@ -67,13 +95,25 @@ def normalize_stations(raw: list[dict[str, Any]], city: str) -> pd.DataFrame:
     for r in raw:
         row = {std: _pick(r, keys) for std, keys in FIELD_MAP.items()}
         row["city"] = city
+        split = _split_bike_counts(r)
+        if split is not None:
+            regular, ebikes = split
+            row["available_ebikes"] = ebikes
+            if regular is not None:
+                # 只有一般車適用免費時段，可借車數只算一般車
+                row["available_bikes"] = regular
+            elif ebikes is not None and row["available_bikes"] is not None:
+                try:
+                    row["available_bikes"] = max(0, int(row["available_bikes"]) - int(ebikes))
+                except (TypeError, ValueError):
+                    pass
         rows.append(row)
 
     df = pd.DataFrame(rows, columns=STANDARD_COLUMNS)
 
     for col in ("lat", "lon"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ("total", "available_bikes", "available_docks"):
+    for col in ("total", "available_bikes", "available_docks", "available_ebikes"):
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
     df["active"] = df["active"].apply(

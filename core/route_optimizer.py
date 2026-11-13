@@ -83,17 +83,31 @@ def _haversine_km_vec(
 
 
 def find_nearest_station(
-    lat: float, lon: float, stations: pd.DataFrame
+    lat: float,
+    lon: float,
+    stations: pd.DataFrame,
+    prefer_ids: set[str] | None = None,
+    max_walk_km: float = MAX_WALK_KM,
 ) -> tuple[str, float]:
     """找出距離指定座標最近的站點，回傳 (station_id, 距離公里)。
 
     以向量化 haversine 一次算完所有站點距離，較逐站 Python 迴圈快很多。
+
+    prefer_ids：若提供，優先挑「步行範圍內、且在此集合中」的最近站
+    （例如「有一般車可借」的站）；範圍內都沒有才退回不分條件的最近站。
+    這避免最近的站剛好沒車（或只剩電輔車）時，整條路線被判定為規劃失敗。
     """
     if stations.empty:
         raise ValueError("stations DataFrame 為空")
     lats = stations["lat"].to_numpy(dtype=float)
     lons = stations["lon"].to_numpy(dtype=float)
     dists = _haversine_km_vec(lat, lon, lats, lons)
+    if prefer_ids is not None:
+        in_set = stations["station_id"].astype(str).isin(prefer_ids).to_numpy()
+        ok = in_set & (dists <= max_walk_km)
+        if ok.any():
+            idx = int(np.flatnonzero(ok)[np.argmin(dists[ok])])
+            return str(stations.iloc[idx]["station_id"]), float(dists[idx])
     idx = int(np.argmin(dists))
     return str(stations.iloc[idx]["station_id"]), float(dists[idx])
 
@@ -182,13 +196,20 @@ def plan_route(
     origin: tuple[float, float],
     destination: tuple[float, float],
     strategy: Strategy = "fewest_swaps",
+    max_walk_km: float = MAX_WALK_KM,
 ) -> RoutePlan:
-    """規劃從 origin 到 destination 的免費騎乘路線。"""
+    """規劃從 origin 到 destination 的免費騎乘路線。
+
+    max_walk_km：起終點到最近站可接受的最大步行距離（公里），超過即回報附近無站。
+    """
     o_lat, o_lon = origin
     d_lat, d_lon = destination
 
-    start_id, start_dist = find_nearest_station(o_lat, o_lon, stations)
-    end_id, end_dist = find_nearest_station(d_lat, d_lon, stations)
+    # 優先選「借得到車」的起站與「還得了車」的終站（圖已依即時車況過濾邊）
+    can_rent = {str(n) for n in graph.nodes if graph.out_degree(n) > 0}
+    can_return = {str(n) for n in graph.nodes if graph.in_degree(n) > 0}
+    start_id, start_dist = find_nearest_station(o_lat, o_lon, stations, can_rent, max_walk_km)
+    end_id, end_dist = find_nearest_station(d_lat, d_lon, stations, can_return, max_walk_km)
     walk_to_start = estimate_walking_time(
         o_lat, o_lon,
         graph.nodes[start_id]["lat"], graph.nodes[start_id]["lon"],
@@ -205,10 +226,10 @@ def plan_route(
             strategy=strategy, feasible=False, message=msg,
         )
 
-    if start_dist > MAX_WALK_KM:
-        return _fail(f"起點附近 {MAX_WALK_KM}km 內無 YouBike 站（最近 {start_dist:.2f}km）")
-    if end_dist > MAX_WALK_KM:
-        return _fail(f"終點附近 {MAX_WALK_KM}km 內無 YouBike 站（最近 {end_dist:.2f}km）")
+    if start_dist > max_walk_km:
+        return _fail(f"起點附近 {max_walk_km:g}km 內無 YouBike 站（最近 {start_dist:.2f}km）")
+    if end_dist > max_walk_km:
+        return _fail(f"終點附近 {max_walk_km:g}km 內無 YouBike 站（最近 {end_dist:.2f}km）")
 
     if start_id == end_id:
         return RoutePlan(

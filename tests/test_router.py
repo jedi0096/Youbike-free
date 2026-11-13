@@ -182,3 +182,45 @@ def test_no_path_returns_friendly_message():
     )
     plan = plan_route(g, isolated, (25.0, 121.5), (25.5, 122.0))
     assert not plan.feasible
+
+
+def test_start_skips_nearest_station_without_free_bikes():
+    # A 最近但沒有一般車（例如只剩電輔車）；B 在步行範圍內且有車 → 應從 B 出發
+    stations = STATIONS.copy()
+    stations.loc[stations["station_id"] == "A", "available_bikes"] = 0
+    g = build_station_graph(
+        stations, free_minutes=30, safety_margin=3,
+        speed_kmh=12.0, detour_factor=1.3, require_availability=True,
+    )
+    origin = (25.0, 121.5 + DEG_PER_KM * 0.2)  # 靠近 A，距 B 約 0.8km
+    dest = (25.0, 121.5 + 3 * DEG_PER_KM)
+    plan = plan_route(g, stations, origin, dest)
+    assert plan.feasible
+    assert plan.segments[0].from_station_id == "B"
+
+
+def test_end_skips_nearest_station_without_docks():
+    stations = STATIONS.copy()
+    stations.loc[stations["station_id"] == "D", "available_docks"] = 0
+    g = build_station_graph(
+        stations, free_minutes=30, safety_margin=3,
+        speed_kmh=12.0, detour_factor=1.3, require_availability=True,
+    )
+    dest = (25.0, 121.5 + 2.8 * DEG_PER_KM)  # 靠近 D，距 C 約 0.8km
+    plan = plan_route(g, stations, (25.0, 121.5), dest)
+    assert plan.feasible
+    assert plan.segments[-1].to_station_id == "C"
+
+
+def test_nearest_falls_back_when_no_preferred_station_in_range():
+    sid, _ = find_nearest_station(25.0, 121.5, STATIONS, prefer_ids=set())
+    assert sid == "A"
+
+
+def test_custom_max_walk_km():
+    """可自訂起終點最遠步行距離：放寬後原本「附近無站」的情況也能規劃。"""
+    g = _build()
+    far_origin = (25.0 - 1.5 / 111, 121.5)  # 離最近站約 1.5 km
+    dest = (25.0, 121.5 + DEG_PER_KM)
+    assert not plan_route(g, STATIONS, far_origin, dest).feasible
+    assert plan_route(g, STATIONS, far_origin, dest, max_walk_km=2.0).feasible
