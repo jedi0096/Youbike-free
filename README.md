@@ -105,9 +105,14 @@ python scripts/smoke_render_map.py    # 產出 route_preview.html
 
 ## 部署
 
-部署到 Streamlit Community Cloud 的完整步驟（含 Secrets 設定）見 [DEPLOY.md](DEPLOY.md)。
-`.streamlit/config.toml` 為主題與伺服器設定；金鑰透過 Streamlit Secrets 提供，
-啟動時會自動橋接到環境變數。
+有兩種方式，完整步驟見 [DEPLOY.md](DEPLOY.md)：
+
+- **自己架設（Docker）**：App 跑在自己的電腦上，不會休眠。裝好 Docker 後執行
+  `docker compose up -d --build`，再開 <http://localhost:8501>。要給外面的人用，
+  可以再開啟 Cloudflare Tunnel 取得公開網址。
+- **Streamlit Community Cloud**：免費託管，但閒置約 12 小時會休眠。
+  `.streamlit/config.toml` 為主題與伺服器設定；金鑰透過 Streamlit Secrets 提供，
+  啟動時會自動橋接到環境變數。
 
 ## 開發進度
 
