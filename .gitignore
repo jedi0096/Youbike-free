@@ -8,3 +8,5 @@ venv/
 .env
 .streamlit/secrets.toml
 route_preview.html
+# 本機安裝檔（例如效能分析工具），不要提交
+*.whl
