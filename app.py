@@ -20,7 +20,7 @@ import os
 import streamlit as st
 from streamlit_folium import st_folium
 
-from ui.cache import get_graph, graph_build_progress, graph_key, load_stations
+from ui.cache import get_graph, graph_build_progress, graph_key
 from ui.extras import render_ai_feedback, render_google_refinement
 from ui.map_view import _build_map, _render_map_click_actions
 from ui.planning import _plan_and_store
@@ -111,13 +111,11 @@ def _render_sheet(result: dict | None, graph, stations) -> None:
 
 
 def _load_graph(inp: dict, loading: LoadingCard):
-    """抓站點、建站點圖，期間更新進度卡。都在快取裡時很快就回來，進度卡不會出現。"""
-    stations = run_with_ticks(
-        lambda: load_stations(inp["cities"]),
-        lambda t: loading.show(0, elapsed_sec=t),
-    )
-    if stations.empty:
-        return None, stations
+    """取得站點圖（含站點資料），期間更新進度卡。
+
+    站點圖還在快取裡時很快就回來，進度卡不會出現；沒有快取時進度卡會顯示
+    「抓即時車況」→「建立連線（幾 %）」。
+    """
     args = (
         inp["cities"],
         inp["has_tpass"],
@@ -128,13 +126,16 @@ def _load_graph(inp: dict, loading: LoadingCard):
         inp["speed_kmh"],
     )
     key = graph_key(*args)
-    return run_with_ticks(
-        lambda: get_graph(*args),
-        lambda t: loading.show(
-            1, graph_build_progress(key), elapsed_sec=t,
-            note="第一次建立會比較久（約 10~20 秒），之後會記住一陣子。",
-        ),
-    )
+    note = "第一次建立會比較久（約 10~20 秒），之後會記住一陣子。"
+
+    def tick(elapsed: float) -> None:
+        state = graph_build_progress(key)
+        if state is not None and state[0] == "build":
+            loading.show(1, state[1], elapsed_sec=elapsed, note=note)
+        else:
+            loading.show(0, elapsed_sec=elapsed)
+
+    return run_with_ticks(lambda: get_graph(*args), tick)
 
 
 def _toggle_sheet() -> None:
@@ -177,7 +178,6 @@ def main() -> None:
             # 只有按下「規劃路線」才重算；結果存入 session_state，後續按 Google / AI 等按鈕
             # 觸發 rerun 時仍能保留（否則 submit 變 False，畫面會跳回預設訊息）。
             if inp["submit"]:
-                loading.show(2)
                 planned = run_with_ticks(
                     lambda: _plan_and_store(inp, graph, stations),
                     lambda t: loading.show(2, elapsed_sec=t),

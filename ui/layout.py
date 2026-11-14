@@ -135,7 +135,8 @@ header[data-testid="stHeader"] { display: none; }
 }
 /* ---- 載入進度卡（ui/progress.py） ---- */
 .st-key-%(loading)s {
-  position: fixed; z-index: 30; left: 50%%; top: 50%%;
+  /* 要蓋在「偏好」彈出選單（z-index 約 1000060）之上，按「重抓即時車況」時才看得到 */
+  position: fixed; z-index: 1000070; left: 50%%; top: 50%%;
   transform: translate(-50%%, -50%%); width: min(340px, calc(100vw - 32px));
   pointer-events: none;
 }

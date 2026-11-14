@@ -82,3 +82,29 @@ def test_loading_card_unknown_fraction_animates_and_escapes():
     assert "yb-load-bar unknown" in html
     assert "&lt;b&gt;站&lt;/b&gt;" in html
     assert "秒" not in html  # 不到 1 秒不顯示秒數
+
+
+def test_get_graph_reports_fetch_then_build_and_cleans_up(monkeypatch):
+    import ui.cache as cache
+
+    phases: list = []
+    key = cache.graph_key(("台北市",), False, 3, False, True, False, 99.0)
+
+    def fake_load(cities):
+        phases.append(cache.graph_build_progress(key))
+        return _stations()
+
+    def fake_build(df, progress=None, **kw):
+        progress(0.5)
+        phases.append(cache.graph_build_progress(key))
+        return build_station_graph(df, **kw)
+
+    monkeypatch.setattr(cache, "load_stations", fake_load)
+    monkeypatch.setattr(cache, "build_station_graph", fake_build)
+    cache.get_graph.clear()
+    g, df = cache.get_graph(*key)
+    assert g.number_of_edges() > 0 and len(df) == 30
+    assert phases == [("fetch", None), ("build", 0.5)]
+    # 準備好之後不留進度
+    assert cache.graph_build_progress(key) is None
+    cache.get_graph.clear()
