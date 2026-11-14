@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 
 import networkx as nx
 import pandas as pd
@@ -27,6 +28,27 @@ _LOG = logging.getLogger(__name__)
 # 規劃結果相關的 session_state 鍵；換區域或清快取時一起清掉。
 RESULT_KEYS = ("result", "google_result", "google_times", "ai_result")
 
+# 正在建的站點圖的進度（0~1），key 是 get_graph 的參數。建圖在背景執行緒裡跑，
+# 畫面那邊的執行緒讀這裡顯示進度條。同一張圖若有兩個人同時在等，看到的是同一份進度。
+_BUILD_PROGRESS: dict[tuple, float] = {}
+_BUILD_PROGRESS_LOCK = threading.Lock()
+
+
+def graph_key(*args) -> tuple:
+    """get_graph 的參數組成的 key，用來查這張圖的建圖進度。參數順序同 get_graph。"""
+    return tuple(args)
+
+
+def graph_build_progress(key: tuple) -> float | None:
+    """回傳這張站點圖目前建了幾成（0~1）；還沒開始建或已經建好則回傳 None。"""
+    with _BUILD_PROGRESS_LOCK:
+        return _BUILD_PROGRESS.get(key)
+
+
+def _report_progress(key: tuple, fraction: float) -> None:
+    with _BUILD_PROGRESS_LOCK:
+        _BUILD_PROGRESS[key] = fraction
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_cached(address: str) -> tuple[float, float, str]:
@@ -43,7 +65,8 @@ def gmaps_travel_cached(
     return tt.minutes, tt.distance_km, tt.mode
 
 
-@st.cache_data(ttl=300, show_spinner="抓取 YouBike 站點資料中…")
+# 載入進度改由 ui/progress.py 的進度卡顯示，所以這兩個快取不另外顯示轉圈
+@st.cache_data(ttl=300, show_spinner=False)
 def load_stations(cities: tuple[str, ...]) -> pd.DataFrame:
     dfs = []
     failures = []
@@ -80,7 +103,7 @@ GRAPH_BUILD_HEADROOM_MB = settings.graph_build_headroom_mb()
 @st.cache_resource(
     ttl=GRAPH_CACHE_TTL_SECONDS,
     max_entries=GRAPH_CACHE_MAX_ENTRIES,
-    show_spinner="建構站點圖中…",
+    show_spinner=False,
 )
 def get_graph(
     cities: tuple[str, ...],
@@ -91,6 +114,10 @@ def get_graph(
     use_cooldown: bool,
     speed_kmh: float = DEFAULT_CYCLING_SPEED_KMH,
 ) -> tuple[nx.DiGraph, pd.DataFrame]:
+    key = graph_key(
+        cities, has_tpass, safety_margin, allow_cross_circle,
+        require_availability, use_cooldown, speed_kmh,
+    )
     df = load_stations(cities)
     if df.empty:
         return nx.DiGraph(), df
@@ -113,10 +140,12 @@ def get_graph(
             get_graph.clear()
             # 舊版 NetworkX 的圖用過之後帶有循環參照，要回收過才會真的把記憶體還回去
             gc.collect()
-        if use_cooldown:
-            g = build_cooldown_graph(df, **common)
-        else:
-            g = build_station_graph(df, **common)
+        builder = build_cooldown_graph if use_cooldown else build_station_graph
+        try:
+            g = builder(df, **common, progress=lambda f: _report_progress(key, f))
+        finally:
+            with _BUILD_PROGRESS_LOCK:
+                _BUILD_PROGRESS.pop(key, None)
     return g, df
 
 

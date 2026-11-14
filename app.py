@@ -10,6 +10,7 @@
     ui/planning.py  起終點解析、規劃、Google 驗證
     ui/map_view.py  地圖與點地圖設定起終點
     ui/results.py   摘要、逐步指引、行程表、冷卻提醒
+    ui/progress.py  載入進度卡（抓站點、建圖、規劃時顯示跑到哪）
     ui/extras.py    Google 校正、AI 建議（選用）
 """
 from __future__ import annotations
@@ -19,16 +20,17 @@ import os
 import streamlit as st
 from streamlit_folium import st_folium
 
-from ui.cache import get_graph
+from ui.cache import get_graph, graph_build_progress, graph_key, load_stations
 from ui.extras import render_ai_feedback, render_google_refinement
 from ui.map_view import _build_map, _render_map_click_actions
 from ui.planning import _plan_and_store
+from ui.progress import LoadingCard, run_with_ticks
 from ui.controls import (
     _init_state_from_query_params,
     _update_query_params,
     render_controls,
 )
-from ui.layout import KEY_MAP, KEY_SEARCH, KEY_SHEET, KEY_SIDE, inject_css
+from ui.layout import KEY_LOADING, KEY_MAP, KEY_SEARCH, KEY_SHEET, KEY_SIDE, inject_css
 from ui.results import (
     _render_endpoint_diagnostic,
     render_cooldown_advice,
@@ -108,6 +110,33 @@ def _render_sheet(result: dict | None, graph, stations) -> None:
     st.html('<div class="yb-credit">地圖資料 © OpenStreetMap contributors</div>')
 
 
+def _load_graph(inp: dict, loading: LoadingCard):
+    """抓站點、建站點圖，期間更新進度卡。都在快取裡時很快就回來，進度卡不會出現。"""
+    stations = run_with_ticks(
+        lambda: load_stations(inp["cities"]),
+        lambda t: loading.show(0, elapsed_sec=t),
+    )
+    if stations.empty:
+        return None, stations
+    args = (
+        inp["cities"],
+        inp["has_tpass"],
+        inp["safety_margin"],
+        inp["allow_cross_circle"],
+        inp["require_availability"],
+        inp["use_cooldown"],
+        inp["speed_kmh"],
+    )
+    key = graph_key(*args)
+    return run_with_ticks(
+        lambda: get_graph(*args),
+        lambda t: loading.show(
+            1, graph_build_progress(key), elapsed_sec=t,
+            note="第一次建立會比較久（約 10~20 秒），之後會記住一陣子。",
+        ),
+    )
+
+
 def _toggle_sheet() -> None:
     st.session_state["sheet_open"] = not st.session_state.get("sheet_open", True)
 
@@ -126,30 +155,38 @@ def main() -> None:
     side = st.container(key=KEY_SIDE)
     card = side.container(key=KEY_SEARCH)
 
+    # 載入進度卡：抓站點、建圖、規劃時浮在地圖中間（ui/progress.py）
+    load_slot = st.container(key=KEY_LOADING).empty()
+
     with card:
         inp = render_controls()
         if not inp["cities"]:
             st.info("請在「⚙ 偏好 → 進階設定」選擇至少一個城市。")
             return
 
-        graph, stations = get_graph(
-            inp["cities"],
-            inp["has_tpass"],
-            inp["safety_margin"],
-            inp["allow_cross_circle"],
-            inp["require_availability"],
-            inp["use_cooldown"],
-            inp["speed_kmh"],
-        )
-        if stations.empty:
-            st.error("無法載入任何站點資料，請稍後按「⚙ 偏好」裡的「重抓即時車況」再試一次。")
-            return
+        steps = ["抓取 YouBike 即時車況", "建立站點之間的連線"]
+        if inp["submit"]:
+            steps.append("找出免費換車路線")
+        loading = LoadingCard(load_slot, steps)
+        try:
+            graph, stations = _load_graph(inp, loading)
+            if stations.empty:
+                st.error("無法載入任何站點資料，請稍後按「⚙ 偏好」裡的「重抓即時車況」再試一次。")
+                return
 
-        # 只有按下「規劃路線」才重算；結果存入 session_state，後續按 Google / AI 等按鈕
-        # 觸發 rerun 時仍能保留（否則 submit 變 False，畫面會跳回預設訊息）。
-        if inp["submit"] and _plan_and_store(inp, graph, stations):
-            _update_query_params(inp)
-            st.session_state["sheet_open"] = True
+            # 只有按下「規劃路線」才重算；結果存入 session_state，後續按 Google / AI 等按鈕
+            # 觸發 rerun 時仍能保留（否則 submit 變 False，畫面會跳回預設訊息）。
+            if inp["submit"]:
+                loading.show(2)
+                planned = run_with_ticks(
+                    lambda: _plan_and_store(inp, graph, stations),
+                    lambda t: loading.show(2, elapsed_sec=t),
+                )
+                if planned:
+                    _update_query_params(inp)
+                    st.session_state["sheet_open"] = True
+        finally:
+            loading.clear()
 
     result = st.session_state.get("result")
     m = _build_map(inp, stations, result)
