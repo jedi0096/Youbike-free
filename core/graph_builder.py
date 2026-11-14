@@ -90,7 +90,7 @@ def build_station_graph(
             return global_max_minutes
         return free_minutes_by_city.get(cities[idx], free_minutes) - safety_margin
 
-    # 用經緯度粗略過濾再算 haversine：1 度緯度 ≈ 111km
+    # 用經緯度粗略過濾再算 haversine：1 度緯度 ≈ 111km（經度視窗見 _candidate_indices）
     lat_window = global_max_km / 111.0
 
     for i in range(n):
@@ -120,7 +120,12 @@ def build_station_graph(
 def _candidate_indices(
     i: int, lats: np.ndarray, lons: np.ndarray, lat_window: float
 ) -> np.ndarray:
-    """粗略地用緯度視窗過濾候選鄰居，回傳 index 陣列（排除自己）。"""
-    mask = np.abs(lats - lats[i]) <= lat_window
+    """用緯度與經度視窗粗篩候選鄰居，回傳 index 陣列（排除自己）。
+
+    經度 1 度的實際長度約為 111km × cos(緯度)，故經度視窗需除以 cos(緯度) 放寬；
+    多了經度條件後，東西向很遠的站不必再逐一算 haversine。
+    """
+    lon_window = lat_window / max(np.cos(np.radians(lats[i])), 0.1)
+    mask = (np.abs(lats - lats[i]) <= lat_window) & (np.abs(lons - lons[i]) <= lon_window)
     mask[i] = False
     return np.where(mask)[0]

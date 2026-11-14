@@ -1,6 +1,8 @@
 """Folium 地圖渲染：站點標記、路線繪製、換車點標示。"""
 from __future__ import annotations
 
+import math
+
 import folium
 import pandas as pd
 
@@ -18,40 +20,132 @@ def _station_color(available_bikes: int, available_docks: int) -> str:
     return "green"
 
 
+# 底圖樣式：介面顯示名稱 → folium tiles 名稱
+MAP_STYLES: dict[str, str] = {
+    "標準": "OpenStreetMap",
+    "淺色（看路線較清楚）": "CartoDB positron",
+    "深色": "CartoDB dark_matter",
+}
+
+_LEGEND_HTML = """
+<div style="position: fixed; bottom: 18px; left: 18px; z-index: 9999;
+     background: rgba(255,255,255,0.92); padding: 6px 10px; border-radius: 6px;
+     font-size: 12px; line-height: 1.6; box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+     color: #222;">
+  <span style="color:#2e8b57;">●</span> 車位充足
+  &nbsp;<span style="color:orange;">●</span> 少於 3
+  &nbsp;<span style="color:red;">●</span> 沒車或沒位
+</div>
+"""
+
+
 def render_base_map(
     stations: pd.DataFrame,
     center: tuple[float, float] | None = None,
     zoom_start: int = 13,
+    tiles: str = "OpenStreetMap",
+    show_legend: bool = True,
 ) -> folium.Map:
-    """建立含所有站點 CircleMarker 的底圖。"""
+    """建立含站點 CircleMarker 的底圖。
+
+    stations 可傳入全部站點，或只傳路線附近的站（減少手機上的繪製負擔）；
+    傳入空 DataFrame 時只畫底圖。
+    """
     if center is None:
-        center = (float(stations["lat"].mean()), float(stations["lon"].mean()))
-    m = folium.Map(location=center, zoom_start=zoom_start, tiles="OpenStreetMap")
+        if stations.empty:
+            center = (25.0478, 121.5170)
+        else:
+            center = (float(stations["lat"].mean()), float(stations["lon"].mean()))
+    m = folium.Map(location=center, zoom_start=zoom_start, tiles=tiles)
+    if stations.empty:
+        return m
     fg = folium.FeatureGroup(name="站點")
-    for _, row in stations.iterrows():
-        bikes = int(row["available_bikes"] or 0)
-        docks = int(row["available_docks"] or 0)
+    # itertuples 比 iterrows 快很多（站點上千個時差異明顯）
+    for row in stations.itertuples(index=False):
+        bikes = int(row.available_bikes or 0)
+        docks = int(row.available_docks or 0)
         color = _station_color(bikes, docks)
-        ebikes = row.get("available_ebikes")
+        ebikes = getattr(row, "available_ebikes", None)
         if ebikes is None or pd.isna(ebikes):
             bike_text = f"可借: {bikes}（可能含電輔車）"
         else:
             bike_text = f"可借一般車: {bikes}<br>電輔車: {int(ebikes)}（不免費）"
         folium.CircleMarker(
-            location=(row["lat"], row["lon"]),
+            location=(row.lat, row.lon),
             radius=4,
             color=color,
             fill=True,
             fill_opacity=0.7,
             popup=folium.Popup(
-                f"<b>{row['name']}</b><br>"
+                f"<b>{row.name}</b><br>"
                 f"{bike_text}<br>可還: {docks}<br>"
-                f"{row['city']}",
+                f"{row.city}",
                 max_width=250,
             ),
         ).add_to(fg)
     fg.add_to(m)
+    if show_legend:
+        m.get_root().html.add_child(folium.Element(_LEGEND_HTML))
     return m
+
+
+def stations_near_route(
+    stations: pd.DataFrame,
+    plan: RoutePlan,
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    padding_km: float = 0.5,
+) -> pd.DataFrame:
+    """只留下路線（含起終點）外框附近的站，讓地圖更清爽、手機更順。"""
+    if stations.empty:
+        return stations
+    lats = [origin[0], destination[0]]
+    lons = [origin[1], destination[1]]
+    if plan.feasible and plan.segments:
+        coords = stations.set_index("station_id")[["lat", "lon"]]
+        ids = {s.from_station_id for s in plan.segments} | {
+            s.to_station_id for s in plan.segments
+        }
+        sub = coords.loc[coords.index.intersection(list(ids))]
+        lats += sub["lat"].tolist()
+        lons += sub["lon"].tolist()
+    pad = padding_km / 111.0
+    lat_lo, lat_hi = min(lats) - pad, max(lats) + pad
+    lon_lo, lon_hi = min(lons) - pad * 1.1, max(lons) + pad * 1.1
+    mask = stations["lat"].between(lat_lo, lat_hi) & stations["lon"].between(lon_lo, lon_hi)
+    return stations[mask]
+
+
+def view_for_route(
+    plan: RoutePlan,
+    stations: pd.DataFrame,
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    map_px: tuple[int, int] = (480, 400),
+) -> tuple[tuple[float, float], int]:
+    """算出剛好容納整條路線（含起終點）的地圖中心與縮放等級。
+
+    streamlit-folium 會忽略 folium 的 fit_bounds，所以改為直接算 zoom。
+    map_px 是扣掉邊距後地圖可視範圍的保守估計（寬, 高 像素），手機上會比桌機窄。
+    """
+    pts = [origin, destination]
+    if plan.feasible and plan.segments:
+        coords = stations.set_index("station_id")[["lat", "lon"]].to_dict("index")
+        for s in plan.segments:
+            for sid in (s.from_station_id, s.to_station_id):
+                c = coords.get(sid)
+                if c:
+                    pts.append((c["lat"], c["lon"]))
+    lats = [p[0] for p in pts]
+    lons = [p[1] for p in pts]
+    center = ((min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2)
+    # Web Mercator：zoom z 時全世界寬 256·2^z 像素（360 度經度）
+    lon_span = max(max(lons) - min(lons), 1e-4)
+    lat_span = max(max(lats) - min(lats), 1e-4) / math.cos(math.radians(center[0]))
+    z_lon = math.log2(map_px[0] * 360 / (256 * lon_span))
+    z_lat = math.log2(map_px[1] * 360 / (256 * lat_span))
+    zoom = int(max(10, min(17, math.floor(min(z_lon, z_lat)))))
+    return center, zoom
 
 
 def draw_route(
