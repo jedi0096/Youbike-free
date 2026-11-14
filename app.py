@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import gc
+import logging
 import os
 import time
 from datetime import datetime
@@ -26,6 +28,7 @@ from config import (
     supported_cities,
 )
 from config import settings
+from core import memory_guard
 from core.cooldown import build_cooldown_graph, plan_cooldown_route
 from core.directions import (
     build_steps,
@@ -59,6 +62,8 @@ from visualization.map_renderer import (
     view_for_route,
 )
 
+
+_LOG = logging.getLogger(__name__)
 
 # 可選區域：只列出至少有一個縣市設定好資料來源的區域。
 SUPPORTED_REGIONS = [r for r in REGIONS if supported_cities(r)]
@@ -125,8 +130,24 @@ def load_stations(cities: tuple[str, ...]) -> pd.DataFrame:
     return filter_invalid_stations(merge_cities(dfs))
 
 
-# 每張圖可能有上百萬條邊，最多只留幾張在記憶體，避免使用者多次調整設定後記憶體爆掉。
-@st.cache_resource(show_spinner="建構站點圖中…", max_entries=4)
+# 站點圖是整個 App 最吃記憶體的東西：側欄每一種設定組合各建一張，以模擬的北北桃
+# 站點實測，一張約 0.4~2 GB（騎得越快、圖越大）。自己架設後 App 會長時間不重啟，
+# 所以快取加上三道保險，數值都可用環境變數調整（見 .env.example 與 DEPLOY.md）：
+# - max_entries：最多同時留幾張圖。
+# - ttl：圖裡含有建圖當下的即時車況（有車可借 / 有位可還的過濾、地圖上的站點顏色），
+#   不定期重建的話，App 開著幾天，路線就會用到幾天前的車況。
+# - 建圖前的記憶體檢查（get_graph 內）：max_entries 是新圖建好才淘汰舊圖，新舊並存時
+#   可能超過主機的記憶體上限；剩餘記憶體不夠就先把舊圖清掉再建。
+GRAPH_CACHE_TTL_SECONDS = settings.graph_cache_ttl_seconds()
+GRAPH_CACHE_MAX_ENTRIES = settings.graph_cache_max_entries()
+GRAPH_BUILD_HEADROOM_MB = settings.graph_build_headroom_mb()
+
+
+@st.cache_resource(
+    ttl=GRAPH_CACHE_TTL_SECONDS,
+    max_entries=GRAPH_CACHE_MAX_ENTRIES,
+    show_spinner="建構站點圖中…",
+)
 def get_graph(
     cities: tuple[str, ...],
     has_tpass: bool,
@@ -149,10 +170,19 @@ def get_graph(
         require_availability=require_availability,
         free_minutes_by_city=fmbc,
     )
-    if use_cooldown:
-        g = build_cooldown_graph(df, **common)
-    else:
-        g = build_station_graph(df, **common)
+    # 走到這裡表示快取裡沒有這張圖，需要重建。一次只建一張，並先確認記憶體放得下。
+    with memory_guard.BUILD_LOCK:
+        if memory_guard.needs_room(GRAPH_BUILD_HEADROOM_MB):
+            _LOG.warning(
+                "可用記憶體少於 %d MB，建新站點圖前先清除快取中的舊圖", GRAPH_BUILD_HEADROOM_MB
+            )
+            get_graph.clear()
+            # 舊版 NetworkX 的圖用過之後帶有循環參照，要回收過才會真的把記憶體還回去
+            gc.collect()
+        if use_cooldown:
+            g = build_cooldown_graph(df, **common)
+        else:
+            g = build_station_graph(df, **common)
     return g, df
 
 

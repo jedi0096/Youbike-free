@@ -11,6 +11,10 @@ from pathlib import Path
 _ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 _loaded = False
 
+# .env.example 裡的佔位字。把範例檔複製成 .env 卻沒換成真的金鑰時，視為「未設定」，
+# 否則 App 會拿這個假金鑰去呼叫 Google，每次規劃都白等一輪失敗。
+_PLACEHOLDERS = frozenset({"YOUR_KEY"})
+
 
 def load_env(path: Path | None = None, override: bool = False) -> None:
     """讀取 .env 檔並寫入 os.environ。
@@ -37,11 +41,11 @@ def load_env(path: Path | None = None, override: bool = False) -> None:
 
 
 def get(key: str, default: str | None = None) -> str | None:
-    """取環境變數（首次呼叫會自動載入 .env）。空字串視為未設定。"""
+    """取環境變數（首次呼叫會自動載入 .env）。空字串與範例檔的佔位字視為未設定。"""
     if not _loaded:
         load_env()
     val = os.environ.get(key)
-    if val is None or val == "":
+    if val is None or val == "" or val in _PLACEHOLDERS:
         return default
     return val
 
@@ -59,3 +63,32 @@ def gemini_api_key() -> str | None:
 def gemini_model() -> str:
     """Gemini 模型名稱，預設用便宜快速的 flash。"""
     return get("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
+
+
+def get_int(key: str, default: int, minimum: int | None = None) -> int:
+    """取整數型環境變數。未設定、不是整數，或小於 minimum 時回傳 default。"""
+    raw = get(key)
+    if raw is None:
+        return default
+    try:
+        val = int(raw.strip())
+    except ValueError:
+        return default
+    if minimum is not None and val < minimum:
+        return default
+    return val
+
+
+def graph_cache_ttl_seconds() -> int:
+    """站點圖快取的有效秒數。到期後下一次使用會以最新車況重建。"""
+    return get_int("GRAPH_CACHE_TTL_SECONDS", 600, minimum=1)
+
+
+def graph_cache_max_entries() -> int:
+    """最多同時保留幾張站點圖（每種側欄設定組合一張）。記憶體充裕的主機可調大。"""
+    return get_int("GRAPH_CACHE_MAX_ENTRIES", 2, minimum=1)
+
+
+def graph_build_headroom_mb() -> int:
+    """建新站點圖前至少要有多少可用記憶體（MB），不夠就先清掉舊圖。0 = 停用這項檢查。"""
+    return get_int("GRAPH_BUILD_HEADROOM_MB", 2048, minimum=0)

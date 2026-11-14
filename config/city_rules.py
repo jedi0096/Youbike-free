@@ -31,7 +31,9 @@ CITY_CONFIG = {
         "free_rules": {"general": 60, "tpass": 60},
         "free_minutes": 60,
         "eligibility": "會員即享前 60 分",
-        "api_url": "https://opendata.tycg.gov.tw/api/v1/dataset.api_access?rid=08274d61-edbe-419d-8fcc-7a643831283d&format=json",
+        # 這個 API 不帶 limit 時只回傳前 20 筆（回傳值是單純的 list，看不出被截斷）；
+        # 2026-11-13 實測加上 limit=2000 會回傳全部 724 站，與 YouBike 官方全台資料一致。
+        "api_url": "https://opendata.tycg.gov.tw/api/v1/dataset.api_access?rid=08274d61-edbe-419d-8fcc-7a643831283d&format=json&limit=2000",
         "living_circle": "北北桃",
         "note": "2023/4/1 起會員前 60 分鐘免費",
     },
