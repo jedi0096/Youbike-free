@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 import networkx as nx
 import pandas as pd
@@ -23,6 +25,7 @@ def build_station_graph(
     min_bikes: int = 1,
     min_docks: int = 1,
     free_minutes_by_city: dict[str, int] | None = None,
+    progress: Callable[[float], None] | None = None,
 ) -> nx.DiGraph:
     """以站點 DataFrame 建立有向圖。
 
@@ -43,6 +46,7 @@ def build_station_graph(
         free_minutes_by_city: {縣市: 免費上限} 對照。提供時，每條邊的免費時限
             依「起點（借車）站所在縣市」決定——因為免費規則以借車地為準。
             未列於對照中的縣市退回 free_minutes。
+        progress: 選用。建圖時會不定期呼叫 progress(已完成比例 0~1)，讓畫面顯示進度。
 
     Returns:
         NetworkX 有向圖。
@@ -93,7 +97,10 @@ def build_station_graph(
     # 用經緯度粗略過濾再算 haversine：1 度緯度 ≈ 111km（經度視窗見 _candidate_indices）
     lat_window = global_max_km / 111.0
 
+    report_every = max(1, n // 100)
     for i in range(n):
+        if progress is not None and i % report_every == 0:
+            progress(i / n)
         # 借不到車的站無法作為某段騎乘的起點 → 直接跳過其所有出邊
         if require_availability and bikes[i] < min_bikes:
             continue
@@ -114,6 +121,8 @@ def build_station_graph(
             )
             if minutes <= max_minutes_i:
                 g.add_edge(ids[i], ids[j], weight=minutes, distance_km=dist)
+    if progress is not None:
+        progress(1.0)
     return g
 
 

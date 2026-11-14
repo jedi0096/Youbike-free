@@ -4,6 +4,7 @@ requests>=2.31
 networkx>=3.0
 geopy>=2.4
 folium>=0.15
-streamlit>=1.43
+# 1.67 以上：載入進度卡在背景執行緒跑，舊版在使用者中途操作時不會停掉舊的執行緒
+streamlit>=1.67
 streamlit-folium>=0.18
 pytest>=7.4
