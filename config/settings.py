@@ -85,7 +85,7 @@ def graph_cache_ttl_seconds() -> int:
 
 
 def graph_cache_max_entries() -> int:
-    """最多同時保留幾張站點圖（每種側欄設定組合一張）。記憶體充裕的主機可調大。"""
+    """最多同時保留幾張站點圖（每種偏好設定組合一張）。記憶體充裕的主機可調大。"""
     return get_int("GRAPH_CACHE_MAX_ENTRIES", 2, minimum=1)
 
 

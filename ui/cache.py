@@ -64,7 +64,7 @@ def load_stations(cities: tuple[str, ...]) -> pd.DataFrame:
     return filter_invalid_stations(merge_cities(dfs))
 
 
-# 站點圖是整個 App 最吃記憶體的東西：側欄每一種設定組合各建一張，以模擬的北北桃
+# 站點圖是整個 App 最吃記憶體的東西：「偏好」每一種設定組合各建一張，以模擬的北北桃
 # 站點實測，一張約 0.4~2 GB（騎得越快、圖越大）。自己架設後 App 會長時間不重啟，
 # 所以快取加上三道保險，數值都可用環境變數調整（見 .env.example 與 DEPLOY.md）：
 # - max_entries：最多同時留幾張圖。
