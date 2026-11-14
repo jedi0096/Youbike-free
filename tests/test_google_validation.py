@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-import app
+from ui import planning
 from core.graph_builder import build_station_graph
 from core.time_estimator import haversine_km
 
@@ -36,9 +36,9 @@ def test_validation_reroutes_around_over_limit_segment(monkeypatch):
     # 直達 A→D 估算約 19.5 分 → 圖中存在；但 Google 實測 40 分需避開
     assert graph.has_edge("A", "D")
 
-    monkeypatch.setattr(app, "gmaps_travel_cached", _fake_gmaps)
+    monkeypatch.setattr(planning, "gmaps_travel_cached", _fake_gmaps)
 
-    plan, rows, any_over, gtimes, n_removed = app.plan_with_google_validation(
+    plan, rows, any_over, gtimes, n_removed = planning.plan_with_google_validation(
         graph, stations, (25.0, 121.5), (25.0, 121.5 + 3 * DEG_PER_KM),
         strategy="fewest_swaps", fmbc={"台北市": 30}, use_cooldown=False,
     )
@@ -53,9 +53,9 @@ def test_validation_passes_when_all_within_limit(monkeypatch):
     stations = _stations()
     graph = build_station_graph(stations, 30, 3, 12.0, 1.3)
     # 所有段 Google 都說 10 分 → 不需重規劃，保留最少換車的直達
-    monkeypatch.setattr(app, "gmaps_travel_cached", lambda *a: (10.0, 1.0, "bicycling"))
+    monkeypatch.setattr(planning, "gmaps_travel_cached", lambda *a: (10.0, 1.0, "bicycling"))
 
-    plan, rows, any_over, gtimes, n_removed = app.plan_with_google_validation(
+    plan, rows, any_over, gtimes, n_removed = planning.plan_with_google_validation(
         graph, stations, (25.0, 121.5), (25.0, 121.5 + 3 * DEG_PER_KM),
         strategy="fewest_swaps", fmbc={"台北市": 30}, use_cooldown=False,
     )

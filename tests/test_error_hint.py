@@ -1,7 +1,7 @@
 """測試 Gemini 錯誤訊息 → 排解提示的對應。"""
 from __future__ import annotations
 
-from app import _gemini_error_hint
+from ui.extras import _gemini_error_hint
 
 
 def test_quota_429_hint():
