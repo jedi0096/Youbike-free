@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -55,6 +57,7 @@ def build_cooldown_graph(
     min_docks: int = 1,
     cooldown_min: float = DEFAULT_COOLDOWN_MIN,
     walk_radius_km: float = DEFAULT_WALK_RADIUS_KM,
+    progress: Callable[[float], None] | None = None,
 ) -> nx.DiGraph:
     """建立 node-split 冷卻圖。參數語意與 build_station_graph 一致，另加冷卻 / 步行設定。"""
     global_free = free_minutes
@@ -91,7 +94,10 @@ def build_cooldown_graph(
     ride_window = global_max_km / 111.0
     walk_window = walk_radius_km / 111.0
 
+    report_every = max(1, n // 100)
     for i in range(n):
+        if progress is not None and i % report_every == 0:
+            progress(i / n)
         can_rent_i = not (require_availability and bikes[i] < min_bikes)
 
         # wait：同站還車後等冷卻再借（需該站可借車）
@@ -134,6 +140,8 @@ def build_cooldown_graph(
             g.add_edge((ids[i], "in"), (ids[j], "out"),
                        weight=walk_min, distance_km=dist, mode="walk", ride_count=0)
 
+    if progress is not None:
+        progress(1.0)
     return g
 
 
