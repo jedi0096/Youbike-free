@@ -26,13 +26,14 @@ CITY_CONFIG = {
     # fetcher 會自動取出清單；欄位名稱差異由 preprocessor.FIELD_MAP 處理。
     # 若 API 憑證有瑕疵，加上 "verify_ssl": False。
     "桃園市": {
-        # 桃園一般會員前 30 分鐘免費；持 TPASS 月票延長為前 60 分鐘免費。
-        "free_rules": {"general": 30, "tpass": 60},
-        "free_minutes": 30,
-        "eligibility": "一般 30 分；TPASS 60 分",
+        # 桃園 2023/4/1 起會員租借 YouBike 2.0 前 60 分鐘免費（TPASS 同樣 60 分）。
+        # 來源：https://www.youbike.com.tw/region/tycg/rate/
+        "free_rules": {"general": 60, "tpass": 60},
+        "free_minutes": 60,
+        "eligibility": "會員即享前 60 分",
         "api_url": "https://opendata.tycg.gov.tw/api/v1/dataset.api_access?rid=08274d61-edbe-419d-8fcc-7a643831283d&format=json",
         "living_circle": "北北桃",
-        "note": "一般會員前 30 分鐘免費；TPASS 用戶前 60 分鐘免費",
+        "note": "2023/4/1 起會員前 60 分鐘免費",
     },
     "高雄市": {
         "free_minutes": 30,

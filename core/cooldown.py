@@ -153,8 +153,13 @@ def plan_cooldown_route(
     o_lat, o_lon = origin
     d_lat, d_lon = destination
 
-    start_id, start_dist = find_nearest_station(o_lat, o_lon, stations)
-    end_id, end_dist = find_nearest_station(d_lat, d_lon, stations)
+    # 優先選「借得到車」的起站與「還得了車」的終站
+    can_rent = {str(n[0]) for n in graph.nodes
+                if n[1] == "out" and graph.out_degree(n) > 0}
+    can_return = {str(n[0]) for n in graph.nodes
+                  if n[1] == "in" and graph.in_degree(n) > 0}
+    start_id, start_dist = find_nearest_station(o_lat, o_lon, stations, can_rent)
+    end_id, end_dist = find_nearest_station(d_lat, d_lon, stations, can_return)
 
     start_node = (start_id, "out")
     end_node = (end_id, "in")
