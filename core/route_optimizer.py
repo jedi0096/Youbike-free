@@ -13,7 +13,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-from config import CROSS_CIRCLE_FEE_NTD
+from config import return_fee_ntd
 from core.time_estimator import estimate_walking_time
 
 _EARTH_RADIUS_KM = 6371.0088
@@ -253,18 +253,13 @@ def plan_route(
 
     segments, total = _build_segments(graph, node_path)
 
-    cross_circle_segments = [
-        s for s in segments
-        if graph.nodes[s.from_station_id].get("circle")
-        != graph.nodes[s.to_station_id].get("circle")
-    ]
-    msg = ""
-    if cross_circle_segments:
-        lo, hi = CROSS_CIRCLE_FEE_NTD
-        msg = (
-            f"⚠️ 路線包含 {len(cross_circle_segments)} 段跨生活圈騎乘，"
-            f"還車時可能被收 {lo}~{hi} 元調度費（即非全程免費）"
-        )
+    msg = cross_fee_message(
+        [
+            (graph.nodes[s.from_station_id].get("city"),
+             graph.nodes[s.to_station_id].get("city"))
+            for s in segments
+        ]
+    )
 
     return RoutePlan(
         segments=segments,
@@ -276,4 +271,16 @@ def plan_route(
         feasible=True,
         message=msg,
         swap_advice=_build_swap_advice(segments, stations),
+    )
+
+
+def cross_fee_message(city_pairs: list[tuple[str | None, str | None]]) -> str:
+    """依各段 (借車縣市, 還車縣市) 產生跨區調度費警告；全部免調度費時回傳空字串。"""
+    fees = [return_fee_ntd(a or "", b or "") for a, b in city_pairs]
+    paid = [f for f in fees if f > 0]
+    if not paid:
+        return ""
+    return (
+        f"⚠️ 路線包含 {len(paid)} 段跨區還車，"
+        f"需付調度費約 {sum(paid)} 元（即非全程免費）"
     )

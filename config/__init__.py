@@ -3,6 +3,8 @@ from .city_rules import (
     ACTIVE_CIRCLE,
     CITY_CONFIG,
     LIVING_CIRCLES,
+    REGIONS,
+    YOUBIKE_NATIONAL_URL,
     CROSS_CIRCLE_FEE_NTD,
     DEFAULT_CYCLING_SPEED_KMH,
     ROUTE_DETOUR_FACTOR,
@@ -11,12 +13,17 @@ from .city_rules import (
     city_to_circle,
     free_minutes_by_city,
     free_minutes_for,
+    has_data_source,
+    return_fee_ntd,
+    supported_cities,
 )
 
 __all__ = [
     "ACTIVE_CIRCLE",
     "CITY_CONFIG",
     "LIVING_CIRCLES",
+    "REGIONS",
+    "YOUBIKE_NATIONAL_URL",
     "CROSS_CIRCLE_FEE_NTD",
     "DEFAULT_CYCLING_SPEED_KMH",
     "ROUTE_DETOUR_FACTOR",
@@ -25,4 +32,7 @@ __all__ = [
     "city_to_circle",
     "free_minutes_by_city",
     "free_minutes_for",
+    "has_data_source",
+    "return_fee_ntd",
+    "supported_cities",
 ]

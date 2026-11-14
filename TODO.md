@@ -51,7 +51,12 @@
 - [~] 多縣市支援（桃園、高雄）
   - [x] 資料層 plug-in ready：fetcher 支援巢狀回傳（data_path，如 CKAN result.records）+ 測試
   - [x] config 標註接入方式（data_path / verify_ssl 說明）
-  - [] 填入桃園、高雄實際 API URL（沙箱無網路，待有網路時尋找並驗證端點）
+  - [x] 桃園接入；其餘縣市（竹竹苗、台中、嘉南高屏、台東）改用 YouBike 官方全台資料
+        （apis.youbike.com.tw/json/station-yb2.json）依 area_code 篩選
+  - [x] 介面改為「先選區域、再選縣市」，一次只載入一個區域以控制記憶體
+  - [x] 跨區還車改用官網調度費表逐對判斷（如桃園↔新竹免費、桃園→苗栗 600 元）
+  - [ ] 在有網路的環境跑 `python scripts/check_cities.py` 確認各縣市 area_code 都抓得到站點
+  - [ ] 新竹縣、竹科、苗栗、台中、嘉義市、嘉義縣、屏東、台東的免費規則待對照官網確認
 - [x] 跨縣市路線規劃（同生活圈如台北↔新北自動連邊；跨生活圈以 allow_cross_circle 開關 + 調度費警示）
       — 逐段免費上限已改為依起站縣市 + 是否持 TPASS（見 Phase 7）
 - [x] 同站續借冷卻時間處理（實測約需等待 10–15 分鐘才能再借同一站）

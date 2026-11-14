@@ -8,7 +8,7 @@ import numpy as np
 import networkx as nx
 import pandas as pd
 
-from config import city_to_circle
+from config import city_to_circle, return_fee_ntd
 from core.time_estimator import estimate_riding_time, haversine_km
 
 
@@ -33,8 +33,8 @@ def build_station_graph(
         safety_margin: 安全餘裕（分鐘）。實際上限 = free_minutes - safety_margin。
         speed_kmh: 平均騎乘時速。
         detour_factor: 路徑修正係數。
-        allow_cross_circle: 預設 False，禁止連接不同生活圈的站點
-            （跨生活圈還車會被收 600~1135 元調度費）。設 True 解鎖。
+        allow_cross_circle: 預設 False，禁止連接「還車需付跨區調度費」的站點對
+            （依 config.return_fee_ntd，600~1135 元）。設 True 解鎖。
         require_availability: 預設 False。設 True 時依即時車輛數過濾邊：
             借不到車（available_bikes < min_bikes）的站不會有出邊；
             還不了車（available_docks < min_docks）的站不會有入邊。
@@ -101,7 +101,7 @@ def build_station_graph(
         max_minutes_i = _max_minutes_for(i)  # 免費規則以借車地（起點 i）為準
         max_km_i = max_minutes_i * speed_kmh / 60 / detour_factor
         for j in _candidate_indices(i, lats, lons, lat_window):
-            if not allow_cross_circle and circles[i] != circles[j]:
+            if not allow_cross_circle and return_fee_ntd(cities[i], cities[j]) > 0:
                 continue
             # 還不了車的站無法作為某段騎乘的終點 → 不連入邊
             if require_availability and docks[j] < min_docks:
