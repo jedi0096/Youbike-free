@@ -103,7 +103,9 @@ header[data-testid="stHeader"] { display: none; }
   .st-key-%(side)s > div:has(> .st-key-%(sheet)s) { display: block; max-height: none; }
   .st-key-%(search)s {
     position: fixed; top: 8px; left: 8px; right: 8px; width: auto;
-    max-height: 60vh; max-height: 60dvh; padding: 10px 12px; gap: .4rem;
+    /* 結果卡最高 44%%，兩張卡加起來不能超過畫面，否則會疊在一起 */
+    max-height: calc(56vh - 16px); max-height: calc(56dvh - 16px);
+    padding: 10px 12px; gap: .4rem;
   }
   .st-key-%(sheet)s {
     position: fixed; left: 0; right: 0; bottom: 0; width: auto;
@@ -112,6 +114,20 @@ header[data-testid="stHeader"] { display: none; }
   }
   .yb-brand { display: none; }
   .yb-big .n { font-size: 28px; }
+}
+/* 矮小的手機（例如 360x640）：結果卡再矮一點，留空間看地圖 */
+@media (max-width: %(mobile)dpx) and (max-height: 700px) {
+  .st-key-%(search)s { max-height: calc(66vh - 16px); max-height: calc(66dvh - 16px); }
+  .st-key-%(sheet)s { max-height: 34vh; max-height: 34dvh; }
+}
+/* 手機橫放（寬但很矮）：左欄整條一起捲動，不要把兩張卡各自擠扁 */
+@media (min-width: %(mobile_plus)dpx) and (max-height: 480px) {
+  .st-key-%(side)s { overflow-y: auto; pointer-events: auto; justify-content: flex-start; }
+  .st-key-%(side)s > div:has(> .st-key-%(search)s),
+  .st-key-%(side)s > div:has(> .st-key-%(sheet)s) {
+    flex: 0 0 auto !important; max-height: none !important;
+  }
+  .st-key-%(search)s, .st-key-%(sheet)s { overflow: visible; flex: 0 0 auto; }
 }
 </style>
 """
@@ -122,4 +138,5 @@ def inject_css() -> None:
     st.html(_CSS % {
         "map": KEY_MAP, "side": KEY_SIDE, "search": KEY_SEARCH, "sheet": KEY_SHEET,
         "gap": CARD_GAP_PX, "card": CARD_WIDTH_PX, "mobile": MOBILE_MAX_WIDTH_PX,
+        "mobile_plus": MOBILE_MAX_WIDTH_PX + 1,
     })

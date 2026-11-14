@@ -172,7 +172,16 @@ def render_itinerary(
     if not plan.feasible or not plan.segments:
         return
     df = itinerary_dataframe(plan, fmbc, id_to_city)
-    st.dataframe(df, hide_index=True, width="stretch")
+    # 結果卡只有約 360px 寬：數字欄放前面、站名放後面，窄螢幕也先看得到重點
+    df = df[[
+        "段", "類型", "時間 (分)", "免費上限 (分)", "免費餘裕 (分)", "距離 (km)",
+        "起站", "終站", "起站縣市",
+    ]]
+    small = st.column_config.Column(width="small")
+    st.dataframe(
+        df, hide_index=True, width="stretch",
+        column_config={c: small for c in df.columns[:6]},
+    )
 
 
 _MODE_LABEL = {"ride": "🚲 騎乘", "walk": "🚶 步行換車", "wait": "⏱️ 等冷卻"}

@@ -123,7 +123,7 @@ def render_controls() -> dict:
     with c_in:
         st.text_input(
             "起點", key="o_text", label_visibility="collapsed",
-            placeholder="起點：地址、地標，或在地圖上點一下",
+            placeholder="起點：地址、地標，或「緯度, 經度」",
         )
         st.text_input(
             "終點", key="d_text", label_visibility="collapsed", placeholder="終點",
@@ -137,7 +137,6 @@ def render_controls() -> dict:
         key="strategy",
         on_change=_keep_strategy,
         label_visibility="collapsed",
-        help="最少換車：換車次數最少；最短時間：騎乘總時間最短（可能多換幾次車）",
     ) or st.session_state["_strategy_prev"]
 
     c_go, c_pref = st.columns([3, 2])
@@ -146,6 +145,10 @@ def render_controls() -> dict:
         region = st.selectbox(
             "區域", SUPPORTED_REGIONS, key="region", on_change=_on_region_change,
             help="一次只載入一個區域的站點，避免把全台站點建成一張圖而吃光記憶體",
+        )
+        st.caption(
+            "路線偏好：「最少換車」換車次數最少；「最短時間」騎乘總時間最短，可能多換幾次車。"
+            "起終點也可以直接在地圖上點一下設定。"
         )
         has_tpass = st.toggle(
             "持有 TPASS 月票", key="tpass",
@@ -196,19 +199,6 @@ def render_controls() -> dict:
             st.caption(
                 "各市免費上限：" + "、".join(f"{c} {m} 分" for c, m in fmbc.items())
             )
-            no_free = [c for c, m in fmbc.items() if m <= 0]
-            if no_free:
-                st.warning(
-                    "、".join(no_free) + " 目前沒有免費時段"
-                    + ("（開啟 TPASS 可能適用）" if not has_tpass else "")
-                    + "，這些縣市的站點不會被當成借車點。"
-                )
-            unverified = [c for c in cities if not CITY_CONFIG[c].get("verified", True)]
-            if unverified:
-                st.caption(
-                    "ℹ️ " + "、".join(unverified)
-                    + " 的免費規則尚未對照官網確認，請以 YouBike 官網公告為準。"
-                )
 
         with st.expander("🗺️ 地圖顯示"):
             map_style = st.selectbox("底圖樣式", list(MAP_STYLES), key="map_style")
@@ -221,6 +211,23 @@ def render_controls() -> dict:
         if st.button("🔄 重抓即時車況", help="清除快取、重抓最新即時車況並重建圖；"
                      "若出現「找不到路線」常是快取的車況過舊所致"):
             _clear_caches_and_rerun()
+
+    # 會影響能不能免費騎的提醒，放在搜尋卡上（不要藏在「偏好」選單裡）
+    if cities:
+        fmbc = free_minutes_by_city(list(cities), has_tpass)
+        no_free = [c for c, m in fmbc.items() if m <= 0]
+        if no_free:
+            st.warning(
+                "、".join(no_free) + " 目前沒有免費時段"
+                + ("（開啟 TPASS 可能適用）" if not has_tpass else "")
+                + "，這些縣市的站點不會被當成借車點。"
+            )
+        unverified = [c for c in cities if not CITY_CONFIG[c].get("verified", True)]
+        if unverified:
+            st.caption(
+                "ℹ️ " + "、".join(unverified)
+                + " 的免費規則尚未對照官網確認，請以 YouBike 官網公告為準。"
+            )
 
     if st.session_state.pop("_auto_plan", False):
         submit = True

@@ -5,7 +5,13 @@ import pandas as pd
 import streamlit as st
 
 from core.directions import format_latlon
-from ui.layout import CARD_GAP_PX, CARD_WIDTH_PX, MOBILE_MAX_WIDTH_PX
+from ui.layout import (
+    CARD_GAP_PX,
+    CARD_WIDTH_PX,
+    KEY_SEARCH,
+    KEY_SHEET,
+    MOBILE_MAX_WIDTH_PX,
+)
 from visualization.map_renderer import (
     ViewPadding,
     draw_route,
@@ -17,12 +23,15 @@ from visualization.map_renderer import (
 )
 
 # 浮動卡片蓋住地圖的範圍：桌機是左邊一整欄；手機是上面的搜尋卡與下面的結果卡。
-# 手機的數字是估計值（搜尋卡約 190px 高、結果卡最高佔畫面 44%），寧可多留一點。
+# 瀏覽器端會量卡片實際大小；量不到時才用這裡的估計值
+# （手機搜尋卡約 215px 高、結果卡最高佔畫面 44%）。
 _VIEW_PADDING = ViewPadding(
     left=CARD_GAP_PX + CARD_WIDTH_PX,
     mobile_max_width=MOBILE_MAX_WIDTH_PX,
-    mobile_top=200,
+    mobile_top=215,
     mobile_bottom_ratio=0.44,
+    search_selector=f".st-key-{KEY_SEARCH}",
+    sheet_selector=f".st-key-{KEY_SHEET}",
 )
 
 

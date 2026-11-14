@@ -49,6 +49,7 @@ class ViewPadding:
 
     桌機用像素（left / top / right / bottom）；手機（寬度 <= mobile_max_width）上下
     改用 mobile_top 像素與 mobile_bottom_ratio（佔畫面高度的比例）。
+    以上都是估計值；有給 search_selector / sheet_selector 時，瀏覽器端會量卡片實際大小。
     """
     left: int = 0
     top: int = 0
@@ -57,13 +58,18 @@ class ViewPadding:
     mobile_max_width: int = 640
     mobile_top: int = 0
     mobile_bottom_ratio: float = 0.0
+    # 網頁上浮動卡片的 CSS 選擇器；瀏覽器端量得到實際大小時，以實際大小為準
+    search_selector: str = ""
+    sheet_selector: str = ""
 
 
 class _OverlayAwareView(MacroElement):
     """在瀏覽器端依實際視窗大小調整地圖：
 
     - 把縮放按鈕放到右上角（左上角被搜尋卡蓋住；手機用兩指縮放，不放按鈕）。
-    - 有路線時，把視野縮放到整條路線都落在「沒被卡片蓋住」的範圍內。
+    - 有路線時，把視野縮放到整條路線都落在「沒被卡片蓋住」的範圍內；
+      視窗大小改變（例如手機轉向）時重新調整，但使用者動過地圖就不再自動移動。
+    - 站點說明框打開時，自動移到不被卡片蓋住的地方。
 
     視窗大小只有瀏覽器知道，所以這段必須用 JS 做；Python 端先用 view_for_route
     給一個大致的中心與縮放，JS 沒跑到時地圖仍然看得到路線。
@@ -74,23 +80,96 @@ class _OverlayAwareView(MacroElement):
         (function () {
             var map = {{ this._parent.get_name() }};
             var pad = {{ this.pad|tojson }};
-            var mobile = window.innerWidth <= pad.mobile_max_width;
+            var bounds = {{ this.bounds|tojson }};
+            var GAP = 24;        // 路線和卡片之間留的空隙（px）
+            var MIN_FREE = 120;  // 路線至少要有這麼大的可視範圍（px），卡片再大也不能擠掉
             // 讓地圖撐滿外框（外框高度由頁面 CSS 決定，不是 st_folium 給的固定像素）
             for (var el = map.getContainer(); el && el !== document.body; el = el.parentElement) {
                 el.style.height = "100vh";
             }
             map.invalidateSize(false);
-            if (!mobile) { L.control.zoom({position: "topright"}).addTo(map); }
-            var bounds = {{ this.bounds|tojson }};
-            if (!bounds) { return; }
-            var gap = 28;
-            var topLeft = mobile ? [gap, pad.mobile_top + gap] : [pad.left + gap, pad.top + gap];
-            var bottomRight = mobile
-                ? [gap, Math.round(window.innerHeight * pad.mobile_bottom_ratio) + gap]
-                : [pad.right + gap, pad.bottom + gap];
-            map.fitBounds(bounds, {
-                paddingTopLeft: topLeft, paddingBottomRight: bottomRight,
-                maxZoom: 17, animate: false
+
+            // 卡片實際蓋住多少：盡量量網頁上的卡片，量不到就用 Python 給的估計值。
+            // 地圖的 iframe 鋪滿整個視窗，所以網頁座標和地圖座標相同。
+            function rectOf(sel) {
+                try {
+                    var e = window.parent.document.querySelector(sel);
+                    if (!e) { return null; }
+                    var r = e.getBoundingClientRect();
+                    return (r.width && r.height) ? r : null;
+                } catch (err) { return null; }
+            }
+            function overlayPadding(mobile) {
+                var size = map.getSize();
+                var search = rectOf(pad.search_selector), sheet = rectOf(pad.sheet_selector);
+                var tl, br;
+                if (mobile) {
+                    var top = search ? search.bottom : pad.mobile_top;
+                    var bottom = sheet ? size.y - sheet.top
+                                       : Math.round(size.y * pad.mobile_bottom_ratio);
+                    tl = [GAP, top + GAP];
+                    br = [GAP, Math.max(0, bottom) + GAP];
+                } else {
+                    var left = pad.left;
+                    if (search || sheet) {
+                        left = Math.max(search ? search.right : 0, sheet ? sheet.right : 0);
+                    }
+                    tl = [left + GAP, pad.top + GAP];
+                    br = [pad.right + GAP, pad.bottom + GAP];
+                }
+                // 視窗太小時按比例縮小留白，至少留 MIN_FREE 給路線
+                [0, 1].forEach(function (i) {
+                    var total = tl[i] + br[i], room = (i ? size.y : size.x) - MIN_FREE;
+                    if (total > room) {
+                        var k = Math.max(0, room) / total;
+                        tl[i] = Math.floor(tl[i] * k); br[i] = Math.floor(br[i] * k);
+                    }
+                });
+                return {tl: tl, br: br};
+            }
+
+            var zoomCtl = null, lastMobile = null, userMoved = false;
+            map.on("dragstart", function () { userMoved = true; });
+            map.getContainer().addEventListener("wheel", function () { userMoved = true; });
+            map.getContainer().addEventListener("touchstart", function (e) {
+                if (e.touches && e.touches.length > 1) { userMoved = true; }
+            });
+
+            function fit(mobile) {
+                if (!bounds || userMoved) { return; }
+                var p = overlayPadding(mobile);
+                map.fitBounds(bounds, {
+                    paddingTopLeft: p.tl, paddingBottomRight: p.br, maxZoom: 17, animate: false
+                });
+            }
+            function apply(force) {
+                var mobile = window.innerWidth <= pad.mobile_max_width;
+                map.invalidateSize(false);
+                // 縮放按鈕放右上角（左上角被搜尋卡蓋住）；手機用兩指縮放，不放按鈕
+                if (!mobile && !zoomCtl) {
+                    zoomCtl = L.control.zoom({position: "topright"}).addTo(map);
+                } else if (mobile && zoomCtl) {
+                    map.removeControl(zoomCtl); zoomCtl = null;
+                }
+                if (force || mobile !== lastMobile) { fit(mobile); }
+                lastMobile = mobile;
+            }
+            apply(true);
+            // 卡片可能比地圖晚畫好，稍後再量一次（使用者已經動過地圖就不動）
+            setTimeout(function () { apply(true); }, 600);
+            var resizeTimer = null;
+            window.addEventListener("resize", function () {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function () { apply(true); }, 150);
+            });
+
+            // 點站點跳出的說明框，自動移到不被卡片蓋住的地方
+            map.on("popupopen", function (e) {
+                var p = overlayPadding(window.innerWidth <= pad.mobile_max_width);
+                e.popup.options.autoPanPaddingTopLeft = L.point(p.tl[0], p.tl[1]);
+                e.popup.options.autoPanPaddingBottomRight = L.point(p.br[0], p.br[1]);
+                e.popup.update();
+                e.popup._adjustPan && e.popup._adjustPan();
             });
         })();
         {% endmacro %}

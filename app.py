@@ -64,6 +64,13 @@ def _render_sheet(result: dict | None, graph, stations) -> None:
 
     plan = result["plan"]
     render_trip_summary(result)
+    # 地址被解析成哪裡：找不到路線時最需要看這個（常是地址被解析到別的地方）
+    for line in result.get("matched", []):
+        st.caption(line)
+    if result.get("n_removed"):
+        st.caption(
+            f"🛰️ 已依 Google 實測自動避開 {result['n_removed']} 段可能超時的路段。"
+        )
     if not plan.feasible:
         return
 
@@ -81,13 +88,7 @@ def _render_sheet(result: dict | None, graph, stations) -> None:
     with tab_steps:
         render_steps(result, heading=False)
     with tab_detail:
-        for line in result.get("matched", []):
-            st.caption(line)
         _render_endpoint_diagnostic(result)
-        if result.get("n_removed"):
-            st.caption(
-                f"🛰️ 已依 Google 實測自動避開 {result['n_removed']} 段可能超時的路段。"
-            )
         render_itinerary(plan, result["fmbc"], result["id_to_city"])
         render_cooldown_advice(plan)
         st.caption(
