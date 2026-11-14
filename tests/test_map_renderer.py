@@ -130,3 +130,47 @@ def test_draw_route_with_infeasible_plan_still_marks_endpoints():
     out = draw_route(m, plan, stations, (25.0, 121.5), (25.01, 121.51))
     html = out._repr_html_()
     assert "起點" in html and "終點" in html
+
+
+def test_route_points_include_endpoints_and_route_stations():
+    from visualization.map_renderer import route_points
+
+    df = _sample_stations()
+    ids = df["station_id"].tolist()
+    plan = RoutePlan(
+        segments=[RouteSegment(ids[0], ids[1], "a", "b", 10.0, 1.5)],
+        total_minutes=10.0, swap_count=0, walk_to_start_min=1.0,
+        walk_from_end_min=1.0, strategy="fewest_swaps", feasible=True,
+    )
+    pts = route_points(plan, df, (24.9, 121.4), (25.2, 121.7))
+    assert pts[:2] == [(24.9, 121.4), (25.2, 121.7)]
+    assert len(pts) == 4
+    # 找不到路線時只剩起終點
+    plan.feasible = False
+    assert route_points(plan, df, (24.9, 121.4), (25.2, 121.7)) == [
+        (24.9, 121.4), (25.2, 121.7),
+    ]
+
+
+def test_fit_view_to_overlays_emits_padding_script():
+    from visualization.map_renderer import ViewPadding, fit_view_to_overlays
+
+    m = render_base_map(_sample_stations(), zoom_control=False)
+    pad = ViewPadding(left=416, mobile_top=200, mobile_bottom_ratio=0.44)
+    fit_view_to_overlays(m, pad, [(25.0, 121.5), (25.1, 121.4)])
+    html = m.get_root().render()
+    assert "fitBounds" in html
+    assert '"left": 416' in html
+    # bounds = [[南, 西], [北, 東]]
+    assert "[[25.0, 121.4], [25.1, 121.5]]" in html
+    # 內建的縮放按鈕關掉，改由腳本放到右上角
+    assert "zoomControl\": false" in html or "zoomControl: false" in html
+    assert 'position: "topright"' in html
+
+
+def test_fit_view_to_overlays_without_points_keeps_view():
+    from visualization.map_renderer import ViewPadding, fit_view_to_overlays
+
+    m = fit_view_to_overlays(render_base_map(_sample_stations()), ViewPadding())
+    html = m.get_root().render()
+    assert "var bounds = null;" in html

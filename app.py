@@ -4,7 +4,8 @@
     streamlit run app.py
 
 各區塊放在 ui/ 底下：
-    ui/sidebar.py   側欄輸入、網址參數
+    ui/layout.py    版面 CSS：地圖鋪滿畫面，搜尋卡與結果卡浮在上面
+    ui/controls.py  搜尋卡的輸入（起終點、偏好）、網址參數
     ui/cache.py     站點 / 站點圖 / 地址 / Google 時間的快取
     ui/planning.py  起終點解析、規劃、Google 驗證
     ui/map_view.py  地圖與點地圖設定起終點
@@ -22,17 +23,18 @@ from ui.cache import get_graph
 from ui.extras import render_ai_feedback, render_google_refinement
 from ui.map_view import _build_map, _render_map_click_actions
 from ui.planning import _plan_and_store
+from ui.controls import (
+    _init_state_from_query_params,
+    _update_query_params,
+    render_controls,
+)
+from ui.layout import KEY_MAP, KEY_SEARCH, KEY_SHEET, KEY_SIDE, inject_css
 from ui.results import (
     _render_endpoint_diagnostic,
     render_cooldown_advice,
     render_itinerary,
     render_steps,
-    render_summary,
-)
-from ui.sidebar import (
-    _init_state_from_query_params,
-    _update_query_params,
-    render_sidebar,
+    render_trip_summary,
 )
 
 # Streamlit Cloud 以 st.secrets 提供金鑰，但 config.settings 讀的是環境變數，
@@ -50,82 +52,118 @@ def _bridge_secrets_to_env() -> None:
             os.environ.setdefault(key, str(val))
 
 
-def main() -> None:
-    _bridge_secrets_to_env()
-    st.set_page_config(page_title="YouBike 免費騎乘規劃", page_icon="🚲", layout="wide")
-    _init_state_from_query_params()
-    st.title("🚲 YouBike 最省錢騎乘攻略")
-    st.caption("自動規劃中途換車路線，每段都在免費時間內還車，全程免費抵達目的地")
-
-    inp = render_sidebar()
-
-    if not inp["cities"]:
-        st.info("請在側欄「進階設定」選擇至少一個城市。")
-        return
-
-    graph, stations = get_graph(
-        inp["cities"],
-        inp["has_tpass"],
-        inp["safety_margin"],
-        inp["allow_cross_circle"],
-        inp["require_availability"],
-        inp["use_cooldown"],
-        inp["speed_kmh"],
-    )
-    if stations.empty:
-        st.error("無法載入任何站點資料，請稍後按側欄的「重抓即時車況」再試一次。")
-        return
-
-    # 只有按下「規劃路線」才重算；結果存入 session_state，後續按 Google / AI 等按鈕
-    # 觸發 rerun 時仍能保留（否則 submit 變 False，畫面會跳回預設訊息）。
-    if inp["submit"] and _plan_and_store(inp, graph, stations):
-        _update_query_params(inp)
-
-    result = st.session_state.get("result")
-    m = _build_map(inp, stations, result)
-
-    map_col, info_col = st.columns([2, 1])
-    with map_col:
-        out = st_folium(
-            m, width=None, height=560, key="main_map",
-            returned_objects=["last_clicked"],
+def _render_sheet(result: dict | None, graph, stations) -> None:
+    """結果卡：摘要永遠顯示；詳細內容（怎麼騎 / 明細 / 更多）可以收起來讓出地圖。"""
+    if result is None:
+        st.markdown(
+            "輸入起點和終點（地址、地標都可以），再按 **規劃路線**。  \n"
+            "💡 也可以直接在地圖上點一下，選「設為起點」或「設為終點」。"
         )
-        _render_map_click_actions((out or {}).get("last_clicked"))
-    with info_col:
-        if result is None:
-            st.info(
-                "在左側輸入起點和終點（地址、地標都可以），再按「規劃路線」。\n\n"
-                "💡 也可以直接在地圖上點一下，選「設為起點」或「設為終點」。"
-            )
-            st.caption(f"已載入 {len(stations)} 個站點")
-        else:
-            render_summary(result["plan"], result.get("depart"))
-            for line in result.get("matched", []):
-                st.caption(line)
-            if result.get("n_removed"):
-                st.caption(
-                    f"🛰️ 已依 Google 實測自動避開 {result['n_removed']} 段可能超時的路段。"
-                )
-            _render_endpoint_diagnostic(result)
-            st.caption(
-                "🔗 網址已更新成這條路線，複製網址就能分享，或加入書籤下次直接用。"
-            )
-            st.caption(
-                f"已載入 {len(stations)} 站、{graph.number_of_edges()} 條連線 · "
-                f"規劃耗時 {result['elapsed_ms']:.0f} ms"
-            )
+        st.caption(f"已載入 {len(stations)} 個站點 · 地圖資料 © OpenStreetMap contributors")
+        return
 
-    if result is not None and result["plan"].feasible:
-        render_steps(result)
-        with st.expander("📋 詳細行程表（每段時間、距離、免費餘裕）"):
-            render_itinerary(result["plan"], result["fmbc"], result["id_to_city"])
-        render_cooldown_advice(result["plan"])
-        render_google_refinement(result["plan"], result["stations"], result["fmbc"])
+    plan = result["plan"]
+    render_trip_summary(result)
+    # 地址被解析成哪裡：找不到路線時最需要看這個（常是地址被解析到別的地方）
+    for line in result.get("matched", []):
+        st.caption(line)
+    if result.get("n_removed"):
+        st.caption(
+            f"🛰️ 已依 Google 實測自動避開 {result['n_removed']} 段可能超時的路段。"
+        )
+    if not plan.feasible:
+        return
+
+    st.session_state.setdefault("sheet_open", True)
+    is_open = st.session_state["sheet_open"]
+    st.button(
+        "▾ 收起詳情，多看一點地圖" if is_open else "▴ 展開逐步指引",
+        key="sheet_toggle", on_click=_toggle_sheet, width="stretch",
+        type="secondary" if is_open else "primary",
+    )
+    if not is_open:
+        return
+
+    tab_steps, tab_detail, tab_more = st.tabs(["🧭 怎麼騎", "📋 明細", "✨ 更多"])
+    with tab_steps:
+        render_steps(result, heading=False)
+    with tab_detail:
+        _render_endpoint_diagnostic(result)
+        render_itinerary(plan, result["fmbc"], result["id_to_city"])
+        render_cooldown_advice(plan)
+        st.caption(
+            "🔗 網址已更新成這條路線，複製網址就能分享，或加入書籤下次直接用。"
+        )
+        st.caption(
+            f"已載入 {len(stations)} 站、{graph.number_of_edges()} 條連線 · "
+            f"規劃耗時 {result['elapsed_ms']:.0f} ms"
+        )
+    with tab_more:
+        render_google_refinement(plan, result["stations"], result["fmbc"])
         render_ai_feedback(
-            result["plan"], result["stations"], result["fmbc"],
+            plan, result["stations"], result["fmbc"],
             result["id_to_city"], result["o_label"], result["d_label"],
             result["has_tpass"],
         )
+    st.html('<div class="yb-credit">地圖資料 © OpenStreetMap contributors</div>')
+
+
+def _toggle_sheet() -> None:
+    st.session_state["sheet_open"] = not st.session_state.get("sheet_open", True)
+
+
+def main() -> None:
+    _bridge_secrets_to_env()
+    st.set_page_config(
+        page_title="YouBike 免費騎乘規劃", page_icon="🚲", layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+    inject_css()
+    _init_state_from_query_params()
+
+    # 版面：地圖鋪滿畫面，左邊（手機是上下）浮著搜尋卡與結果卡。
+    # 訊息（載入失敗、找不到地址…）都寫進搜尋卡，否則會被地圖蓋住看不到。
+    side = st.container(key=KEY_SIDE)
+    card = side.container(key=KEY_SEARCH)
+
+    with card:
+        inp = render_controls()
+        if not inp["cities"]:
+            st.info("請在「⚙ 偏好 → 進階設定」選擇至少一個城市。")
+            return
+
+        graph, stations = get_graph(
+            inp["cities"],
+            inp["has_tpass"],
+            inp["safety_margin"],
+            inp["allow_cross_circle"],
+            inp["require_availability"],
+            inp["use_cooldown"],
+            inp["speed_kmh"],
+        )
+        if stations.empty:
+            st.error("無法載入任何站點資料，請稍後按「⚙ 偏好」裡的「重抓即時車況」再試一次。")
+            return
+
+        # 只有按下「規劃路線」才重算；結果存入 session_state，後續按 Google / AI 等按鈕
+        # 觸發 rerun 時仍能保留（否則 submit 變 False，畫面會跳回預設訊息）。
+        if inp["submit"] and _plan_and_store(inp, graph, stations):
+            _update_query_params(inp)
+            st.session_state["sheet_open"] = True
+
+    result = st.session_state.get("result")
+    m = _build_map(inp, stations, result)
+    with st.container(key=KEY_MAP):
+        # height 只是初始值，實際高度由 ui/layout.py 的 CSS 撐滿整個視窗
+        out = st_folium(
+            m, width=None, height=600, key="main_map",
+            returned_objects=["last_clicked"],
+        )
+    with card:
+        _render_map_click_actions((out or {}).get("last_clicked"))
+
+    with side.container(key=KEY_SHEET):
+        _render_sheet(result, graph, stations)
 
 
 if __name__ == "__main__":
